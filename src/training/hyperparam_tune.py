@@ -187,29 +187,36 @@ def save_all_trials_summary(study: optuna.Study, output_dir: Path):
         f"Completed: {len(completed_trials)}",
         f"Failed: {len(failed_trials)}",
         "",
-        f"Best trial: #{study.best_trial.number}",
-        f"Best validation MAE: {study.best_value:.6f}",
-        "",
-        "=" * 80,
-        "TOP 10 TRIALS",
-        "=" * 80,
-        "",
     ]
     
-    # Sort completed trials by value
-    sorted_trials = sorted(completed_trials, key=lambda t: t.value)[:10]
-    
-    for rank, trial in enumerate(sorted_trials, 1):
-        lines.append(f"Rank {rank}: Trial #{trial.number}")
-        lines.append(f"  Validation MAE: {trial.value:.6f}")
-        lines.append(f"  Key params:")
-        for key in ["ffn_hidden_dim", "ffn_num_layers", "learning_rate", "batch_size"]:
-            if key in trial.params:
-                value = trial.params[key]
-                if isinstance(value, float) and value < 0.01:
-                    lines.append(f"    {key}: {value:.6f}")
-                else:
-                    lines.append(f"    {key}: {value}")
+    if completed_trials:
+        lines.extend([
+            f"Best trial: #{study.best_trial.number}",
+            f"Best validation MAE: {study.best_value:.6f}",
+            "",
+            "=" * 80,
+            "TOP 10 TRIALS",
+            "=" * 80,
+            "",
+        ])
+        
+        # Sort completed trials by value
+        sorted_trials = sorted(completed_trials, key=lambda t: t.value)[:10]
+        
+        for rank, trial in enumerate(sorted_trials, 1):
+            lines.append(f"Rank {rank}: Trial #{trial.number}")
+            lines.append(f"  Validation MAE: {trial.value:.6f}")
+            lines.append(f"  Key params:")
+            for key in ["ffn_hidden_dim", "ffn_num_layers", "learning_rate", "batch_size"]:
+                if key in trial.params:
+                    value = trial.params[key]
+                    if isinstance(value, float) and value < 0.01:
+                        lines.append(f"    {key}: {value:.6f}")
+                    else:
+                        lines.append(f"    {key}: {value}")
+            lines.append("")
+    else:
+        lines.append("No completed trials yet.")
         lines.append("")
     
     lines.append("=" * 80)
@@ -540,10 +547,10 @@ def main():
     
     # Save the configurations for reference
     config_copy = run_dir / "tuning_config.yaml"
-    config_copy.write_text(yaml.dump(tuning_cfg, default_flow_style=False, sort_keys=False))
+    safe_write_text(config_copy, yaml.dump(tuning_cfg, default_flow_style=False, sort_keys=False))
     
     model_config_copy = run_dir / "base_model_config.yaml"
-    model_config_copy.write_text(yaml.dump(base_model_cfg.__dict__, default_flow_style=False, sort_keys=False))
+    safe_write_text(model_config_copy, yaml.dump(base_model_cfg.__dict__, default_flow_style=False, sort_keys=False))
     
     # Prepare data once (this creates the processed data if it doesn't exist)
     print("[hyperparam_tune] Preparing data (one-time processing)...")
@@ -578,9 +585,10 @@ def main():
     # Build objective function
     obj = build_objective(data_cfg, base_model_cfg, tuning_cfg, run_dir)
     
-    # Add callback to save best result after each trial
+    # Add callback to save best result and summary after each trial
     def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial):
         if trial.state == optuna.trial.TrialState.COMPLETE:
+            # Save both the best result and the full summary after each trial
             save_current_best(study, run_dir)
             save_all_trials_summary(study, run_dir)
             print(f"[Trial {trial.number}] Value: {trial.value:.6f} | Best so far: {study.best_value:.6f}")
