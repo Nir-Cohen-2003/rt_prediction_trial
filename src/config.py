@@ -50,7 +50,7 @@ class ModelConfig:
     ffn_num_layers: int = 2
     dropout: float = 0.0
     activation: str = "relu"
-    aggregation: Literal["mean", "sum", "norm"] = "mean"
+    aggregation: Literal["mean", "sum", "norm", "attentive"] = "mean"
     
     # For custom GNN (you'll implement)
     custom_gnn_class: Optional[str] = None  # e.g., "SimpleGNNRegressor"
@@ -58,7 +58,11 @@ class ModelConfig:
     # Input features
     use_additional_features: bool = False
     additional_feature_dim: int = 0
-
+    def __post_init__(self):
+        """Validate model_type and custom_gnn_class."""
+        # attentive is possible only in chemprop
+        if self.model_type != "chemprop" and self.aggregation == "attentive":
+            raise ValueError("Attentive aggregation is only supported in Chemprop models.")
 
 @dataclass
 class TrainingConfig:

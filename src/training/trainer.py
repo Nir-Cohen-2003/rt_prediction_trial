@@ -3,110 +3,122 @@ import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 from lightning.pytorch.loggers import CSVLogger
 from pathlib import Path
-from typing import Optional
 import json
-from dataclasses import asdict
 
-from chemprop.models import MPNN
-from chemprop.nn import RegressionFFN, BondMessagePassing
-
-from ..config import Config, DataConfig, ModelConfig, TrainingConfig
+from ..config import Config, TrainingConfig
 from ..data.datamodule import RTDataModule
+from ..model.chemprop_model import build_chemprop_mpnn
 
 
 class ChempropRTModule(L.LightningModule):
     """
     Lightning module wrapping Chemprop for RT prediction.
+    
+    This module handles:
+    - Forward pass
+    - Training/validation/test steps with loss computation
+    - Optimizer and scheduler configuration
+    - Metric logging (MAE, RMSE on denormalized values)
     """
     
     def __init__(
         self,
-        model_config: ModelConfig,
+        model,
         training_config: TrainingConfig,
         rt_mean: float,
         rt_std: float
     ):
         """
         Args:
-            model_config: Model configuration
-            training_config: Training configuration
+            model: Pre-built Chemprop MPNN model
+            training_config: Training configuration (optimizer, scheduler, etc.)
             rt_mean: Mean RT for denormalization
             rt_std: Std RT for denormalization
         """
         super().__init__()
-        self.model_config = model_config
+        self.model = model
         self.training_config = training_config
         self.rt_mean = rt_mean
         self.rt_std = rt_std
         
-        # Build Chemprop model
-        self.model = self._build_chemprop_model()
-        
         # Loss function (MSE for regression)
         self.loss_fn = torch.nn.MSELoss()
         
-        # Save hyperparameters
+        # Save hyperparameters (excluding the model itself to avoid duplication)
         self.save_hyperparameters(ignore=["model"])
     
-    def _build_chemprop_model(self) -> MPNN:
-        """Build Chemprop MPNN model."""
-        cfg = self.model_config
-        
-        # Message passing
-        message_passing = BondMessagePassing(
-            d_h=cfg.message_hidden_dim,
-            depth=cfg.num_layers,
-            dropout=cfg.dropout,
-            activation=cfg.activation,
-            # aggregation=cfg.aggregation
-        )
-        
-        # Feed-forward network
-        ffn = RegressionFFN(
-            input_dim=cfg.message_hidden_dim,
-            hidden_dim=cfg.ffn_hidden_dim,
-            n_layers=cfg.ffn_num_layers,
-            dropout=cfg.dropout,
-            activation=cfg.activation,
-            n_tasks=1  # Single RT value
-        )
-        
-        # Full model
-        model = MPNN(
-            message_passing=message_passing,
-            agg=None,  # Aggregation handled in message passing
-            predictor=ffn,
-            batch_norm=False,
-            metrics=None
-        )
-        
-        return model
-    
     def forward(self, batch):
-        """Forward pass."""
-        return self.model(batch)
+        """
+        Forward pass through the model.
+        
+        Args:
+            batch: Chemprop batch containing molecular graphs
+        
+        Returns:
+            Predictions (normalized RT values)
+        """
+        # Extract the BatchMolGraph from the TrainingBatch
+        return self.model(batch.bmg)
     
     def _shared_step(self, batch, batch_idx: int, stage: str):
-        """Shared step for train/val/test."""
+        """
+        Shared step logic for train/val/test.
+        
+        Args:
+            batch: Chemprop batch
+            batch_idx: Batch index
+            stage: One of "train", "val", or "test"
+        
+        Returns:
+            Loss value
+        """
         # Forward pass
         preds = self(batch).squeeze(-1)
-        targets = batch.y.squeeze(-1)
+        # Extract targets from the TrainingBatch
+        targets = batch.Y.squeeze(-1)
+        
+        # Get actual batch size
+        batch_size = len(targets)
         
         # Compute loss (on normalized values)
         loss = self.loss_fn(preds, targets)
         
-        # Denormalize for metrics
+        # Denormalize for interpretable metrics
         preds_denorm = preds * self.rt_std + self.rt_mean
         targets_denorm = targets * self.rt_std + self.rt_mean
         
-        # Compute metrics
+        # Compute metrics on denormalized values
         mae = torch.abs(preds_denorm - targets_denorm).mean()
         rmse = torch.sqrt(torch.pow(preds_denorm - targets_denorm, 2).mean())
         
-        # Log
-        self.log(f"{stage}/loss", loss, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
-        self.log(f"{stage}/mae", mae, prog_bar=(stage != "train"), on_step=False, on_epoch=True, sync_dist=True)
-        self.log(f"{stage}/rmse", rmse, prog_bar=False, on_step=False, on_epoch=True, sync_dist=True)
+        # Log metrics with explicit batch_size
+        self.log(
+            f"{stage}/loss",
+            loss,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=batch_size
+        )
+        self.log(
+            f"{stage}/mae",
+            mae,
+            prog_bar=(stage != "train"),
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=batch_size
+        )
+        self.log(
+            f"{stage}/rmse",
+            rmse,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=batch_size
+        )
         
         return loss
     
@@ -123,10 +135,15 @@ class ChempropRTModule(L.LightningModule):
         return self._shared_step(batch, batch_idx, "test")
     
     def configure_optimizers(self):
-        """Configure optimizer and scheduler."""
+        """
+        Configure optimizer and optional learning rate scheduler.
+        
+        Returns:
+            Optimizer or dict with optimizer and scheduler
+        """
         cfg = self.training_config
         
-        # Optimizer
+        # Select and initialize optimizer
         if cfg.optimizer == "adam":
             optimizer = torch.optim.Adam(
                 self.parameters(),
@@ -149,10 +166,11 @@ class ChempropRTModule(L.LightningModule):
         else:
             raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
         
-        # Scheduler (optional)
+        # Return early if no scheduler
         if not cfg.use_scheduler:
             return optimizer
         
+        # Configure learning rate scheduler
         if cfg.scheduler_type == "plateau":
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer,
@@ -185,15 +203,25 @@ class ChempropRTModule(L.LightningModule):
         return [optimizer], [scheduler]
 
 
-def train_from_config(config: Config) -> tuple[L.Trainer, ChempropRTModule, RTDataModule]:
+def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTDataModule]:
     """
-    Main training function.
+    Main training function that orchestrates the entire pipeline.
+    
+    This function:
+    1. Sets random seeds for reproducibility
+    2. Initializes the data module and prepares data
+    3. Builds the model from configuration
+    4. Wraps the model in a Lightning module
+    5. Sets up callbacks (checkpointing, early stopping, LR monitoring)
+    6. Configures logging
+    7. Trains the model
+    8. Evaluates on test set
     
     Args:
-        config: Complete configuration object
+        config: Complete configuration object containing data, model, and training configs
     
     Returns:
-        trainer: Lightning Trainer
+        trainer: Lightning Trainer instance
         module: Trained Lightning module
         datamodule: DataModule with processed data
     """
@@ -211,21 +239,29 @@ def train_from_config(config: Config) -> tuple[L.Trainer, ChempropRTModule, RTDa
         num_workers=4
     )
     
-    # Prepare and setup data
+    # Prepare and setup data (loads or processes data)
     datamodule.prepare_data()
     datamodule.setup()
     
-    # Initialize model
-    print("[train_from_config] Initializing model...")
+    # Build model based on model type
+    print("[train_from_config] Building model...")
     if config.model.model_type == "chemprop":
+        # Build the Chemprop MPNN model
+        model = build_chemprop_mpnn(config.model)
+        
+        # Wrap in Lightning module
         module = ChempropRTModule(
-            model_config=config.model,
+            model=model,
             training_config=config.training,
             rt_mean=datamodule.rt_mean,
             rt_std=datamodule.rt_std
         )
     else:
-        raise NotImplementedError("Custom GNN not implemented yet")
+        # Placeholder for custom GNN models
+        raise NotImplementedError(
+            f"Model type '{config.model.model_type}' not implemented yet. "
+            "Currently supported: 'chemprop'"
+        )
     
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
@@ -252,7 +288,7 @@ def train_from_config(config: Config) -> tuple[L.Trainer, ChempropRTModule, RTDa
         name=config.experiment_name
     )
     
-    # Save configuration
+    # Save configuration to log directory for reproducibility
     config_path = Path(logger.log_dir) / "config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w") as f:
@@ -273,15 +309,17 @@ def train_from_config(config: Config) -> tuple[L.Trainer, ChempropRTModule, RTDa
         enable_progress_bar=True
     )
     
-    # Train
+    # Train the module
     print("[train_from_config] Starting training...")
     trainer.fit(module, datamodule=datamodule)
     
     # Test with best checkpoint
     print("[train_from_config] Testing with best checkpoint...")
     if checkpoint_callback.best_model_path:
+        print(f"[train_from_config] Loading best model from {checkpoint_callback.best_model_path}")
         trainer.test(module, datamodule=datamodule, ckpt_path=checkpoint_callback.best_model_path)
     else:
+        print("[train_from_config] No best checkpoint found, testing with final model")
         trainer.test(module, datamodule=datamodule)
     
     print("[train_from_config] Training complete!")

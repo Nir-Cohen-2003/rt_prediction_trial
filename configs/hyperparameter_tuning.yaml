@@ -1,0 +1,77 @@
+# Hyperparameter Tuning Configuration for RT Prediction
+# This file defines the search space for Optuna optimization
+
+# Study configuration
+study_name: "rt_prediction_tuning_v1"
+direction: "minimize"  # minimize validation MAE
+trials: 100  # number of trials to run
+n_jobs: 1 
+seed: 42
+
+
+# Training configuration for each trial
+epochs_per_trial: 50
+early_stop_patience: 15
+
+# Output
+output_path: "results/tuning_results.json"
+
+# ============================================================================
+# MODEL HYPERPARAMETERS SEARCH SPACE
+# ============================================================================
+
+# Message passing network dimensions
+message_hidden_dim_choices: [8, 16, 32, 64, 128, 256]
+
+# Number of message passing layers
+num_layers_min: 2
+num_layers_max: 5
+
+# Feed-forward network dimensions
+ffn_hidden_dim_choices: [16, 32, 64, 128, 256]
+
+# Number of feed-forward layers
+ffn_num_layers_min: 1
+ffn_num_layers_max: 3
+
+# Dropout rate
+dropout_min: 0.0
+dropout_max: 0.5
+
+# Activation function
+activation_choices: ["relu", "leaky_relu", "elu", "selu"]
+
+# Aggregation method
+aggregation_choices: ["mean", "sum", "norm"]
+
+# ============================================================================
+# TRAINING HYPERPARAMETERS SEARCH SPACE
+# ============================================================================
+
+# Learning rate (log scale)
+lr_min: 0.00001  # 1e-5
+lr_max: 0.01     # 1e-2
+
+# Batch size
+batch_size_choices: [32, 64, 128, 256]
+
+# Optimizer
+optimizer_choices: ["adam", "adamw"]
+
+# Weight decay (log scale)
+weight_decay_min: 0.0
+weight_decay_max: 0.01
+
+# ============================================================================
+# LEARNING RATE SCHEDULER (Optional)
+# ============================================================================
+
+tune_scheduler: true
+
+scheduler_type_choices: ["plateau", "cosine"]
+
+# For ReduceLROnPlateau
+scheduler_patience_min: 5
+scheduler_patience_max: 20
+scheduler_factor_min: 0.1
+scheduler_factor_max: 0.7

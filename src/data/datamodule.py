@@ -10,6 +10,7 @@ from chemprop.data.dataloader import build_dataloader
 from ..config import DataConfig
 from rdkit import Chem
 from dataclasses import asdict
+import pickle
 
 
 def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
@@ -130,7 +131,7 @@ class RTDataModule(L.LightningDataModule):
         self,
         config: DataConfig,
         model_type: str = "chemprop",
-        batch_size: int = 64,
+        batch_size: int = 256,
         num_workers: int = 4,
         custom_splitter: Optional[Callable] = None,
         force_rebuild: bool = False
@@ -211,8 +212,13 @@ class RTDataModule(L.LightningDataModule):
         # Check if already processed
         train_path = self.output_dir / self.config.train_file
         stats_path = self.output_dir / "stats.json"
+        chemprop_train_path = self.output_dir / "train_chemprop.pkl"
+        chemprop_val_path = self.output_dir / "val_chemprop.pkl"
+        chemprop_test_path = self.output_dir / "test_chemprop.pkl"
         
-        if train_path.exists() and stats_path.exists() and not self.force_rebuild:
+        if (train_path.exists() and stats_path.exists() and 
+            chemprop_train_path.exists() and chemprop_val_path.exists() and 
+            chemprop_test_path.exists() and not self.force_rebuild):
             print(f"[RTDataModule] Processed data already exists in {self.output_dir}, skipping.")
             return
         
@@ -247,7 +253,7 @@ class RTDataModule(L.LightningDataModule):
         val_df.write_parquet(self.output_dir / self.config.val_file)
         test_df.write_parquet(self.output_dir / self.config.test_file)
         
-        # Save statistics
+        # Compute and save statistics
         stats = {
             "train_size": len(train_df),
             "val_size": len(val_df),
@@ -260,6 +266,22 @@ class RTDataModule(L.LightningDataModule):
         
         with open(stats_path, "w") as f:
             json.dump(stats, f, indent=2)
+        
+        # Create and save Chemprop datasets
+        print("[RTDataModule] Creating and saving Chemprop datasets...")
+        rt_mean = stats["rt_mean"]
+        rt_std = stats["rt_std"]
+        
+        train_chemprop = self._polars_to_chemprop(train_df, rt_mean, rt_std)
+        val_chemprop = self._polars_to_chemprop(val_df, rt_mean, rt_std)
+        test_chemprop = self._polars_to_chemprop(test_df, rt_mean, rt_std)
+        
+        with open(chemprop_train_path, "wb") as f:
+            pickle.dump(train_chemprop, f)
+        with open(chemprop_val_path, "wb") as f:
+            pickle.dump(val_chemprop, f)
+        with open(chemprop_test_path, "wb") as f:
+            pickle.dump(test_chemprop, f)
         
         print(f"[RTDataModule] prepare_data: END - saved to {self.output_dir}")
     
@@ -279,18 +301,25 @@ class RTDataModule(L.LightningDataModule):
         
         print(f"[RTDataModule] Loaded stats: RT mean={self.rt_mean:.2f}, std={self.rt_std:.2f}")
         
-        # Load splits
-        train_df = pl.read_parquet(self.output_dir / self.config.train_file)
-        val_df = pl.read_parquet(self.output_dir / self.config.val_file)
-        test_df = pl.read_parquet(self.output_dir / self.config.test_file)
-        
         if self.model_type == "chemprop":
-            # Convert to Chemprop format
-            self.train_dataset = self._polars_to_chemprop(train_df)
-            self.val_dataset = self._polars_to_chemprop(val_df)
-            self.test_dataset = self._polars_to_chemprop(test_df)
+            # Load pre-saved Chemprop datasets
+            print("[RTDataModule] Loading pre-saved Chemprop datasets...")
+            chemprop_train_path = self.output_dir / "train_chemprop.pkl"
+            chemprop_val_path = self.output_dir / "val_chemprop.pkl"
+            chemprop_test_path = self.output_dir / "test_chemprop.pkl"
+            
+            with open(chemprop_train_path, "rb") as f:
+                self.train_dataset = pickle.load(f)
+            with open(chemprop_val_path, "rb") as f:
+                self.val_dataset = pickle.load(f)
+            with open(chemprop_test_path, "rb") as f:
+                self.test_dataset = pickle.load(f)
         else:
-            # For custom GNN, store as polars (you'll convert in your model)
+            # For custom GNN, load polars dataframes
+            train_df = pl.read_parquet(self.output_dir / self.config.train_file)
+            val_df = pl.read_parquet(self.output_dir / self.config.val_file)
+            test_df = pl.read_parquet(self.output_dir / self.config.test_file)
+            
             self.train_dataset = train_df
             self.val_dataset = val_df
             self.test_dataset = test_df
@@ -298,7 +327,7 @@ class RTDataModule(L.LightningDataModule):
         print(f"[RTDataModule] setup: train={len(self.train_dataset)}, "
               f"val={len(self.val_dataset)}, test={len(self.test_dataset)}")
     
-    def _polars_to_chemprop(self, df: pl.DataFrame) -> MoleculeDataset:
+    def _polars_to_chemprop(self, df: pl.DataFrame, rt_mean: float, rt_std: float) -> MoleculeDataset:
         """Convert Polars DataFrame to Chemprop MoleculeDataset."""
         datapoints = []
         skipped = 0
@@ -308,16 +337,15 @@ class RTDataModule(L.LightningDataModule):
             rt = row[self.config.rt_column]
             
             # Normalize RT
-            rt_norm = (rt - self.rt_mean) / self.rt_std
+            rt_norm = (rt - rt_mean) / rt_std
             
-            # Convert InChI to SMILES with RDKit
+            # Convert InChI to RDKit mol
             mol = Chem.MolFromInchi(inchi)
             if mol is None:
                 skipped += 1
                 continue
-            
-            smiles = Chem.MolToSmiles(mol)
-            datapoint = MoleculeDatapoint.from_smi(smiles, rt_norm)
+            # Fix: Pass rt_norm as a list (y should be a sequence of targets)
+            datapoint = MoleculeDatapoint(mol, [rt_norm])  # Changed from rt_norm to [rt_norm]
             datapoints.append(datapoint)
         
         if skipped > 0:
@@ -332,7 +360,7 @@ class RTDataModule(L.LightningDataModule):
                 self.train_dataset,
                 batch_size=self.batch_size,
                 num_workers=self.num_workers,
-                shuffle=True
+                shuffle=True,
             )
         else:
             # Custom GNN - you'll implement this
@@ -345,7 +373,7 @@ class RTDataModule(L.LightningDataModule):
                 self.val_dataset,
                 batch_size=self.batch_size,
                 num_workers=self.num_workers,
-                shuffle=False
+                shuffle=False,
             )
         else:
             raise NotImplementedError("Custom GNN dataloader not implemented yet")
@@ -357,7 +385,7 @@ class RTDataModule(L.LightningDataModule):
                 self.test_dataset,
                 batch_size=self.batch_size,
                 num_workers=self.num_workers,
-                shuffle=False
+                shuffle=False,
             )
         else:
             raise NotImplementedError("Custom GNN dataloader not implemented yet")

@@ -7,8 +7,11 @@ version = "0.1.0"
 
 [system-requirements]
 cuda = "12.0"
+
 [tasks]
-train = "python -m src.training.main"
+train = "python -m src.training.main --data-config configs/data_config.yaml --model-config configs/model_config.yaml --training-config configs/training_config.yaml --experiment-name rt_baseline"
+tune = "python -m src.training.hyperparam_tune --data-config configs/data_config.yaml --tuning-config configs/hyperparameter_tuning.yaml"
+
 [dependencies]
 python = "3.12.*"
 
@@ -22,3 +25,4 @@ python-lmdb = "*"
 pytorch-gpu = ">=2.7.0"
 cuda-version = "12.6.*"
 pytorch_geometric = ">=2.6.1"
+pyyaml = "*"

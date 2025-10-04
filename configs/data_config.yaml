@@ -1,0 +1,25 @@
+# Data configuration for RT prediction
+
+# Input data
+raw_data_path: "data/raw/SMRT_dataset.csv"
+cid_column: "pubchem"
+rt_column: "rt"
+inchi_column: "inchi"
+
+# Splitting
+split_method: "random"
+test_fraction: 0.1
+val_fraction: 0.1
+random_seed: 42
+
+# Output paths
+output_dir: "data/processed"
+train_file: "train.parquet"
+val_file: "val.parquet"
+test_file: "test.parquet"
+
+# Preprocessing
+remove_duplicates: true
+filter_invalid_inchi: true
+min_rt: 400
+max_rt: null

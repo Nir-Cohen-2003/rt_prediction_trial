@@ -1,0 +1,19 @@
+# Model configuration for RT prediction
+
+model_type: "chemprop"
+
+# Chemprop MPNN settings
+message_hidden_dim: 64
+num_layers: 3
+ffn_hidden_dim: 64
+ffn_num_layers: 2
+dropout: 0.0
+activation: "relu"
+aggregation: "sum"
+
+# Custom GNN (if model_type != "chemprop")
+custom_gnn_class: null
+
+# Additional features
+use_additional_features: false
+additional_feature_dim: 0
