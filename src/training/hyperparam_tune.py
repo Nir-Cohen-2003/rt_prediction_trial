@@ -9,6 +9,8 @@ import yaml
 import gc
 import os
 from datetime import datetime
+import fcntl  # For file locking
+import time
 from ..config import DataConfig, ModelConfig, TrainingConfig
 from .trainer import ChempropRTModule
 from ..data.datamodule import RTDataModule
@@ -27,6 +29,50 @@ def load_yaml_to_dataclass(path: Path | None, cls):
         return cls(**data)
     except TypeError as e:
         raise ValueError(f"Failed to create {cls.__name__} from config file: {e}")
+
+
+def safe_write_json(filepath: Path, data: dict, max_retries: int = 5):
+    """Thread-safe JSON file writing with file locking."""
+    for attempt in range(max_retries):
+        try:
+            with open(filepath, 'w') as f:
+                # Acquire exclusive lock
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    json.dump(data, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                finally:
+                    # Release lock
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            return
+        except (IOError, OSError) as e:
+            if attempt < max_retries - 1:
+                time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+            else:
+                print(f"Warning: Failed to write {filepath} after {max_retries} attempts: {e}")
+
+
+def safe_write_text(filepath: Path, content: str, max_retries: int = 5):
+    """Thread-safe text file writing with file locking."""
+    for attempt in range(max_retries):
+        try:
+            with open(filepath, 'w') as f:
+                # Acquire exclusive lock
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.write(content)
+                    f.flush()
+                    os.fsync(f.fileno())
+                finally:
+                    # Release lock
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            return
+        except (IOError, OSError) as e:
+            if attempt < max_retries - 1:
+                time.sleep(0.1 * (attempt + 1))  # Exponential backoff
+            else:
+                print(f"Warning: Failed to write {filepath} after {max_retries} attempts: {e}")
 
 
 def parse_args():
@@ -53,7 +99,7 @@ def save_trial_result(trial: optuna.Trial, value: float, output_dir: Path):
         "state": trial.state.name,
     }
     
-    trial_file.write_text(json.dumps(trial_data, indent=2))
+    safe_write_json(trial_file, trial_data)
 
 
 def save_current_best(study: optuna.Study, output_dir: Path):
@@ -69,7 +115,7 @@ def save_current_best(study: optuna.Study, output_dir: Path):
         "num_total_trials": len(study.trials),
         "last_updated": datetime.now().isoformat(),
     }
-    best_json.write_text(json.dumps(best_data, indent=2))
+    safe_write_json(best_json, best_data)
     
     # Human-readable text
     best_txt = output_dir / "best_result.txt"
@@ -121,7 +167,7 @@ def save_current_best(study: optuna.Study, output_dir: Path):
     
     lines.append("\n" + "=" * 80)
     
-    best_txt.write_text("\n".join(lines))
+    safe_write_text(best_txt, "\n".join(lines))
 
 
 def save_all_trials_summary(study: optuna.Study, output_dir: Path):
@@ -168,7 +214,7 @@ def save_all_trials_summary(study: optuna.Study, output_dir: Path):
     
     lines.append("=" * 80)
     
-    summary_file.write_text("\n".join(lines))
+    safe_write_text(summary_file, "\n".join(lines))
 
 
 def build_objective(data_cfg: DataConfig,
@@ -355,18 +401,21 @@ def build_objective(data_cfg: DataConfig,
             n_jobs = tuning_cfg.get("n_jobs", 1)
             if torch.cuda.is_available():
                 n_gpus = torch.cuda.device_count()
-                # Assign GPU based on trial number (allows multiple trials per GPU)
+                # Calculate how many trials per GPU we expect
+                trials_per_gpu = max(1, n_jobs // n_gpus)
+                
+                # Assign GPU based on trial number (round-robin across GPUs)
                 gpu_id = trial.number % n_gpus
                 
-                # Set CUDA_VISIBLE_DEVICES for this trial to prevent cross-GPU interference
-                os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-                
-                # Use GPU with single device
+                # Use the specific GPU device directly
                 accelerator = "gpu"
-                devices = 1
+                devices = [gpu_id]
                 
                 # Reduce num_workers for parallel trials to avoid dataloader worker overhead
-                num_workers = 0 if n_jobs > 1 else 2
+                # With multiple trials per GPU, reduce workers even more
+                num_workers = 0 if trials_per_gpu > 1 else 2
+                
+                print(f"[Trial {trial.number}] Assigned to GPU {gpu_id} (expected {trials_per_gpu} trials/GPU)")
             else:
                 raise RuntimeError("No GPU available! This script requires GPU.")
             

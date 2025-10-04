@@ -6,4 +6,4 @@
 #PBS -m ae
 #PBS -M nircoh@weizmann.ac.il
 cd /work/nircoh/rt_trial
-pixi run tune
+pixi run tune-chemeleon
