@@ -49,7 +49,7 @@ class ModelConfig:
     ffn_hidden_dim: int = 300
     ffn_num_layers: int = 2
     dropout: float = 0.0
-    activation: str = "relu"
+    activation: Literal["relu", "leaky_relu", "elu"] = "relu"
     aggregation: Literal["mean", "sum", "norm", "attentive"] = "mean"
     
     # For custom GNN (you'll implement)

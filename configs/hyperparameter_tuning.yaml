@@ -2,10 +2,10 @@
 # This file defines the search space for Optuna optimization
 
 # Study configuration
-study_name: "rt_prediction_tuning_v1"
+study_name: "rt_prediction_tuning_v2"
 direction: "minimize"  # minimize validation MAE
-trials: 100  # number of trials to run
-n_jobs: 1 
+trials: 50  # number of trials to run
+n_jobs: 8
 seed: 42
 
 
@@ -21,14 +21,14 @@ output_path: "results/tuning_results.json"
 # ============================================================================
 
 # Message passing network dimensions
-message_hidden_dim_choices: [8, 16, 32, 64, 128, 256]
+message_hidden_dim_choices: [8, 16, 32, 64, 128]
 
 # Number of message passing layers
 num_layers_min: 2
-num_layers_max: 5
+num_layers_max: 4
 
 # Feed-forward network dimensions
-ffn_hidden_dim_choices: [16, 32, 64, 128, 256]
+ffn_hidden_dim_choices: [16, 32, 64, 128]
 
 # Number of feed-forward layers
 ffn_num_layers_min: 1
@@ -39,7 +39,7 @@ dropout_min: 0.0
 dropout_max: 0.5
 
 # Activation function
-activation_choices: ["relu", "leaky_relu", "elu", "selu"]
+activation_choices: ["relu", "leaky_relu", "elu"]
 
 # Aggregation method
 aggregation_choices: ["mean", "sum", "norm"]
@@ -53,7 +53,7 @@ lr_min: 0.00001  # 1e-5
 lr_max: 0.01     # 1e-2
 
 # Batch size
-batch_size_choices: [32, 64, 128, 256]
+batch_size_choices: [256]
 
 # Optimizer
 optimizer_choices: ["adam", "adamw"]
@@ -66,7 +66,7 @@ weight_decay_max: 0.01
 # LEARNING RATE SCHEDULER (Optional)
 # ============================================================================
 
-tune_scheduler: true
+tune_scheduler: false
 
 scheduler_type_choices: ["plateau", "cosine"]
 

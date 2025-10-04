@@ -9,7 +9,7 @@ from ..config import Config, TrainingConfig
 from ..data.datamodule import RTDataModule
 from ..model.chemprop_model import build_chemprop_mpnn
 
-
+torch.set_float32_matmul_precision('medium')
 class ChempropRTModule(L.LightningModule):
     """
     Lightning module wrapping Chemprop for RT prediction.
@@ -176,8 +176,7 @@ class ChempropRTModule(L.LightningModule):
                 optimizer,
                 mode=cfg.monitor_mode,
                 patience=cfg.scheduler_patience,
-                factor=cfg.scheduler_factor,
-                verbose=True
+                factor=cfg.scheduler_factor
             )
             return {
                 "optimizer": optimizer,

@@ -1,0 +1,9 @@
+#!/bin/bash
+#PBS -N rt_tuning
+#PBS -l select=1:ncpus=40:mem=240gb:ngpus=4:node_type=cfc
+#PBS -q gpuq_private
+#PBS -j eo
+#PBS -m ae
+#PBS -M nircoh@weizmann.ac.il
+cd /work/nircoh/rt_trial
+pixi run tune

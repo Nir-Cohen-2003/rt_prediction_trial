@@ -2,10 +2,13 @@ import argparse
 import json
 from pathlib import Path
 import optuna
+from optuna.storages import JournalStorage, JournalFileStorage
 import torch
 import lightning as L
 import yaml
 import gc
+import os
+from datetime import datetime
 from ..config import DataConfig, ModelConfig, TrainingConfig
 from .trainer import ChempropRTModule
 from ..data.datamodule import RTDataModule
@@ -15,23 +18,15 @@ from ..model.chemprop_model import build_chemprop_mpnn
 def load_yaml_to_dataclass(path: Path | None, cls):
     """Load YAML file into a dataclass instance."""
     if path is None:
-        # Try to create with defaults, but this may fail for required fields
-        try:
-            return cls()
-        except TypeError:
-            raise ValueError(f"Cannot create {cls.__name__} without configuration file")
+        raise ValueError(f"Cannot create {cls.__name__} without configuration file")
     
     data = yaml.safe_load(Path(path).read_text())
     
     # Try to create instance directly from dict (works if cls supports **kwargs)
     try:
         return cls(**data)
-    except TypeError:
-        # Fallback: create empty instance and set attributes
-        inst = cls.__new__(cls)
-        for k, v in data.items():
-            setattr(inst, k, v)
-        return inst
+    except TypeError as e:
+        raise ValueError(f"Failed to create {cls.__name__} from config file: {e}")
 
 
 def parse_args():
@@ -42,14 +37,149 @@ def parse_args():
     return p.parse_args()
 
 
+def save_trial_result(trial: optuna.Trial, value: float, output_dir: Path):
+    """Save individual trial result immediately after completion."""
+    trial_file = output_dir / f"trial_{trial.number:04d}.json"
+    
+    trial_data = {
+        "trial_number": trial.number,
+        "value": value,
+        "params": trial.params,
+        "datetime_start": trial.datetime_start.isoformat() if trial.datetime_start else None,
+        "datetime_complete": trial.datetime_complete.isoformat() if trial.datetime_complete else None,
+        "duration_seconds": (trial.datetime_complete - trial.datetime_start).total_seconds() 
+                           if trial.datetime_complete and trial.datetime_start else None,
+        "state": trial.state.name,
+    }
+    
+    trial_file.write_text(json.dumps(trial_data, indent=2))
+
+
+def save_current_best(study: optuna.Study, output_dir: Path):
+    """Save current best results in both JSON and human-readable format."""
+    
+    # Machine-readable JSON
+    best_json = output_dir / "best_result.json"
+    best_data = {
+        "best_trial_number": study.best_trial.number,
+        "best_value": study.best_value,
+        "best_params": study.best_trial.params,
+        "num_completed_trials": len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]),
+        "num_total_trials": len(study.trials),
+        "last_updated": datetime.now().isoformat(),
+    }
+    best_json.write_text(json.dumps(best_data, indent=2))
+    
+    # Human-readable text
+    best_txt = output_dir / "best_result.txt"
+    lines = [
+        "=" * 80,
+        "CURRENT BEST HYPERPARAMETERS",
+        "=" * 80,
+        f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Completed trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])} / {len(study.trials)}",
+        "",
+        f"Best Trial Number: {study.best_trial.number}",
+        f"Best Validation MAE: {study.best_value:.6f}",
+        "",
+        "Best Hyperparameters:",
+        "-" * 80,
+    ]
+    
+    # Group parameters by category
+    model_params = {}
+    training_params = {}
+    scheduler_params = {}
+    
+    for key, value in study.best_trial.params.items():
+        if key in ["message_hidden_dim", "num_layers", "ffn_hidden_dim", "ffn_num_layers", 
+                   "dropout", "activation", "aggregation"]:
+            model_params[key] = value
+        elif key.startswith("scheduler_"):
+            scheduler_params[key] = value
+        else:
+            training_params[key] = value
+    
+    if model_params:
+        lines.append("\n[Model Architecture]")
+        for key, value in sorted(model_params.items()):
+            lines.append(f"  {key:25s}: {value}")
+    
+    if training_params:
+        lines.append("\n[Training]")
+        for key, value in sorted(training_params.items()):
+            if isinstance(value, float) and value < 0.01:
+                lines.append(f"  {key:25s}: {value:.6f}")
+            else:
+                lines.append(f"  {key:25s}: {value}")
+    
+    if scheduler_params:
+        lines.append("\n[Learning Rate Scheduler]")
+        for key, value in sorted(scheduler_params.items()):
+            lines.append(f"  {key:25s}: {value}")
+    
+    lines.append("\n" + "=" * 80)
+    
+    best_txt.write_text("\n".join(lines))
+
+
+def save_all_trials_summary(study: optuna.Study, output_dir: Path):
+    """Save summary of all trials in human-readable format."""
+    summary_file = output_dir / "trials_summary.txt"
+    
+    completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    failed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
+    
+    lines = [
+        "=" * 80,
+        "HYPERPARAMETER TUNING SUMMARY",
+        "=" * 80,
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        f"Total trials: {len(study.trials)}",
+        f"Completed: {len(completed_trials)}",
+        f"Failed: {len(failed_trials)}",
+        "",
+        f"Best trial: #{study.best_trial.number}",
+        f"Best validation MAE: {study.best_value:.6f}",
+        "",
+        "=" * 80,
+        "TOP 10 TRIALS",
+        "=" * 80,
+        "",
+    ]
+    
+    # Sort completed trials by value
+    sorted_trials = sorted(completed_trials, key=lambda t: t.value)[:10]
+    
+    for rank, trial in enumerate(sorted_trials, 1):
+        lines.append(f"Rank {rank}: Trial #{trial.number}")
+        lines.append(f"  Validation MAE: {trial.value:.6f}")
+        lines.append(f"  Key params:")
+        for key in ["message_hidden_dim", "num_layers", "learning_rate", "batch_size"]:
+            if key in trial.params:
+                value = trial.params[key]
+                if isinstance(value, float) and value < 0.01:
+                    lines.append(f"    {key}: {value:.6f}")
+                else:
+                    lines.append(f"    {key}: {value}")
+        lines.append("")
+    
+    lines.append("=" * 80)
+    
+    summary_file.write_text("\n".join(lines))
+
+
 def build_objective(data_cfg: DataConfig,
-                    tuning_cfg: dict):
+                    tuning_cfg: dict,
+                    output_dir: Path):
     """
     Build the objective function for Optuna optimization.
     
     Args:
         data_cfg: Data configuration (constant across trials)
         tuning_cfg: Dictionary with tuning parameters
+        output_dir: Directory to save results
     
     Returns:
         objective: Function that takes a trial and returns metric to optimize
@@ -153,7 +283,7 @@ def build_objective(data_cfg: DataConfig,
             
             # Create model configuration with sampled hyperparameters
             model_cfg = ModelConfig(
-                model_type="chemprop",  # Constant for now
+                model_type="chemprop",
                 message_hidden_dim=message_hidden_dim,
                 num_layers=num_layers,
                 ffn_hidden_dim=ffn_hidden_dim,
@@ -161,8 +291,8 @@ def build_objective(data_cfg: DataConfig,
                 dropout=dropout,
                 activation=activation,
                 aggregation=aggregation,
-                use_additional_features=data_cfg.additional_features is not None and len(data_cfg.additional_features) > 0,
-                additional_feature_dim=len(data_cfg.additional_features) if data_cfg.additional_features else 0
+                use_additional_features=False,
+                additional_feature_dim=0
             )
             
             # Create training configuration with sampled hyperparameters
@@ -185,12 +315,32 @@ def build_objective(data_cfg: DataConfig,
             if tuning_cfg.get("seed") is not None:
                 L.seed_everything(tuning_cfg["seed"] + trial.number, workers=True)
             
+            # GPU allocation: Round-robin assignment across available GPUs
+            n_jobs = tuning_cfg.get("n_jobs", 1)
+            if torch.cuda.is_available():
+                n_gpus = torch.cuda.device_count()
+                # Assign GPU based on trial number (allows multiple trials per GPU)
+                gpu_id = trial.number % n_gpus
+                
+                # Set CUDA_VISIBLE_DEVICES for this trial to prevent cross-GPU interference
+                # This isolates the trial to a specific GPU
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+                
+                # Use GPU with single device
+                accelerator = "gpu"
+                devices = 1  # Use first device (which is the GPU we set in CUDA_VISIBLE_DEVICES)
+                
+                # Reduce num_workers for parallel trials to avoid dataloader worker overhead
+                num_workers = 0 if n_jobs > 1 else 2
+            else:
+                raise RuntimeError("No GPU available! This script requires GPU.")
+            
             # Create new datamodule for this trial with the new batch size
             dm = RTDataModule(
                 config=data_cfg,
                 model_type=model_cfg.model_type,
                 batch_size=batch_size,
-                num_workers=4
+                num_workers=num_workers
             )
             # Setup will load pre-processed data (fast)
             dm.setup()
@@ -210,13 +360,15 @@ def build_objective(data_cfg: DataConfig,
             # Create minimal trainer (no checkpointing or logging for speed)
             trainer = L.Trainer(
                 max_epochs=training_cfg.num_epochs,
-                accelerator=training_cfg.accelerator,
-                devices=training_cfg.devices,
+                accelerator=accelerator,
+                devices=devices,
                 precision=training_cfg.precision,
                 enable_progress_bar=False,
                 logger=False,
                 enable_checkpointing=False,
-                callbacks=[]
+                callbacks=[],
+                # Enable GPU memory sharing optimizations
+                benchmark=True,  # cudnn.benchmark for faster training
             )
             
             # Train the model
@@ -244,7 +396,12 @@ def build_objective(data_cfg: DataConfig,
             if metric is None:
                 return float("inf")  # Return high value if metric not found (we're minimizing)
             
-            return float(metric.item()) if isinstance(metric, torch.Tensor) else float(metric)
+            value = float(metric.item()) if isinstance(metric, torch.Tensor) else float(metric)
+            
+            # Save this trial's result immediately
+            save_trial_result(trial, value, output_dir)
+            
+            return value
         
         finally:
             # Clean up to prevent memory leaks
@@ -259,6 +416,15 @@ def main():
     """Main entry point for hyperparameter tuning."""
     args = parse_args()
     
+    # Check GPU availability
+    if not torch.cuda.is_available():
+        raise RuntimeError("No GPU available! This script requires GPU for training.")
+    
+    n_gpus = torch.cuda.device_count()
+    print(f"[hyperparam_tune] Found {n_gpus} GPU(s)")
+    for i in range(n_gpus):
+        print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+    
     # Load data configuration (constant across all trials)
     print("[hyperparam_tune] Loading data configuration...")
     data_cfg = load_yaml_to_dataclass(args.data_config, DataConfig)
@@ -267,23 +433,23 @@ def main():
     print("[hyperparam_tune] Loading tuning configuration...")
     tuning_cfg = yaml.safe_load(Path(args.tuning_config).read_text())
     
-    # Override data config with tuning config if specified
-    if "data_dir" in tuning_cfg:
-        data_cfg.data_dir = tuning_cfg["data_dir"]
-    if "train_file" in tuning_cfg:
-        data_cfg.train_file = tuning_cfg["train_file"]
-    if "val_file" in tuning_cfg:
-        data_cfg.val_file = tuning_cfg["val_file"]
-    if "test_file" in tuning_cfg:
-        data_cfg.test_file = tuning_cfg["test_file"]
-    if "smiles_column" in tuning_cfg:
-        data_cfg.smiles_column = tuning_cfg["smiles_column"]
-    if "target_column" in tuning_cfg:
-        data_cfg.target_column = tuning_cfg["target_column"]
-    if "additional_features" in tuning_cfg:
-        data_cfg.additional_features = tuning_cfg["additional_features"]
-    
     print(f"[hyperparam_tune] Data config: {data_cfg}")
+    
+    # Create output directory
+    output_dir = Path(tuning_cfg.get("output_path", "results/tuning_results")).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create subdirectory for this run with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    study_name = tuning_cfg.get("study_name", "rt_prediction_tuning")
+    run_dir = output_dir / f"{study_name}_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"[hyperparam_tune] Results will be saved to: {run_dir}")
+    
+    # Save the tuning configuration for reference
+    config_copy = run_dir / "tuning_config.yaml"
+    config_copy.write_text(yaml.dump(tuning_cfg, default_flow_style=False, sort_keys=False))
     
     # Prepare data once (this creates the processed data if it doesn't exist)
     print("[hyperparam_tune] Preparing data (one-time processing)...")
@@ -300,52 +466,60 @@ def main():
     if tuning_cfg.get("seed") is not None:
         L.seed_everything(tuning_cfg["seed"], workers=True)
     
-    # Create Optuna study
+    # Create persistent storage using SQLite for crash recovery
+    storage_path = run_dir / "optuna_study.db"
+    storage = f"sqlite:///{storage_path}"
+    
+    # Create Optuna study with persistent storage
     print("[hyperparam_tune] Creating Optuna study...")
     study = optuna.create_study(
-        study_name=tuning_cfg.get("study_name", "rt_prediction_tuning"),
+        study_name=study_name,
         direction=tuning_cfg.get("direction", "minimize"),  # Minimize MAE
-        storage=tuning_cfg.get("storage"),
-        load_if_exists=bool(tuning_cfg.get("storage"))
+        storage=storage,
+        load_if_exists=True  # Resume if crashed
     )
     
+    print(f"[hyperparam_tune] Study storage: {storage_path}")
+    
     # Build objective function
-    obj = build_objective(data_cfg, tuning_cfg)
+    obj = build_objective(data_cfg, tuning_cfg, run_dir)
+    
+    # Add callback to save best result after each trial
+    def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial):
+        if trial.state == optuna.trial.TrialState.COMPLETE:
+            save_current_best(study, run_dir)
+            save_all_trials_summary(study, run_dir)
+            print(f"[Trial {trial.number}] Value: {trial.value:.6f} | Best so far: {study.best_value:.6f}")
     
     # Run optimization with parallel trials support
     n_jobs = tuning_cfg.get("n_jobs", 1)
-    print(f"[hyperparam_tune] Starting optimization with {tuning_cfg.get('trials', 100)} trials...")
-    print(f"[hyperparam_tune] Running {n_jobs} trial(s) in parallel...")
+    n_trials = tuning_cfg.get("trials", 100)
+    
+    print(f"\n[hyperparam_tune] Starting optimization:")
+    print(f"  Total trials: {n_trials}")
+    print(f"  Parallel jobs: {n_jobs}")
+    print(f"  Available GPUs: {n_gpus}")
+    print(f"  Trials per GPU: ~{n_jobs / n_gpus:.1f}")
+    print()
     
     study.optimize(
         obj,
-        n_trials=tuning_cfg.get("trials", 100),
-        n_jobs=n_jobs
+        n_trials=n_trials,
+        n_jobs=n_jobs,
+        callbacks=[callback]
     )
     
-    # Print and save results
+    # Final summary
     print("\n" + "="*80)
     print("OPTIMIZATION COMPLETE")
     print("="*80)
     print(f"Best trial: {study.best_trial.number}")
-    print(f"Best val MAE: {study.best_value:.4f}")
-    print("\nBest hyperparameters:")
-    for key, value in study.best_trial.params.items():
-        print(f"  {key}: {value}")
-    
-    # Save results
-    output = {
-        "best_trial": study.best_trial.number,
-        "best_val_mae": study.best_value,
-        "best_params": study.best_trial.params,
-        "study_name": tuning_cfg.get("study_name", "rt_prediction_tuning"),
-        "num_trials": len(study.trials)
-    }
-    
-    out_path = Path(tuning_cfg.get("output_path", "results/tuning_results.json"))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(output, indent=2))
-    print(f"\n[hyperparam_tune] Results saved to {out_path}")
+    print(f"Best val MAE: {study.best_value:.6f}")
+    print(f"\nAll results saved to: {run_dir}")
+    print(f"  - Individual trials: trial_XXXX.json")
+    print(f"  - Current best: best_result.json and best_result.txt")
+    print(f"  - Summary: trials_summary.txt")
+    print(f"  - Study database: optuna_study.db (for resuming)")
 
 
 if __name__ == "__main__":
