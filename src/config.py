@@ -41,7 +41,12 @@ class DataConfig:
 class ModelConfig:
     """Configuration for the prediction model (Chemprop or custom GNN)."""
     
-    model_type: Literal["chemprop", "custom_gnn"] = "chemprop"
+    model_type: Literal["chemprop", "custom_gnn", "chemeleon"] = "chemprop"
+    
+    # CheMeleon specific settings
+    use_chemeleon: bool = False
+    chemeleon_checkpoint: Optional[str] = None  # Path or URL to CheMeleon checkpoint
+    freeze_chemeleon: bool = False  # Whether to freeze the pretrained encoder
     
     # Chemprop specific settings
     message_hidden_dim: int = 300
@@ -58,11 +63,16 @@ class ModelConfig:
     # Input features
     use_additional_features: bool = False
     additional_feature_dim: int = 0
+    
     def __post_init__(self):
         """Validate model_type and custom_gnn_class."""
         # attentive is possible only in chemprop
         if self.model_type != "chemprop" and self.aggregation == "attentive":
             raise ValueError("Attentive aggregation is only supported in Chemprop models.")
+        
+        # Validate CheMeleon settings
+        if self.use_chemeleon and self.chemeleon_checkpoint is None:
+            raise ValueError("chemeleon_checkpoint must be provided when use_chemeleon=True")
 
 @dataclass
 class TrainingConfig:

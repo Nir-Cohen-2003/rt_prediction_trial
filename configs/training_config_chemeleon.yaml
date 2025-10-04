@@ -1,0 +1,38 @@
+# Training configuration for RT prediction with CheMeleon fine-tuning
+
+# Optimization
+# Use higher learning rate for fine-tuning compared to training from scratch
+learning_rate: 0.0005
+batch_size: 64  # Smaller batch size due to larger model
+num_epochs: 50
+optimizer: "adam"
+weight_decay: 0.0
+
+# Learning rate scheduling
+# Recommended for fine-tuning to prevent catastrophic forgetting
+use_scheduler: true
+scheduler_type: "plateau"
+scheduler_patience: 5
+scheduler_factor: 0.5
+
+# Early stopping
+early_stop_patience: 15
+monitor_metric: "val/mae"
+monitor_mode: "min"
+
+# Checkpointing
+checkpoint_dir: "checkpoints/chemeleon"
+save_top_k: 3
+
+# Logging
+log_dir: "logs/chemeleon"
+log_every_n_steps: 10
+
+# Hardware
+accelerator: "auto"
+devices: "auto"
+precision: "32"  # Use "16" or "bf16" for faster training with large models
+
+# Reproducibility
+seed: 42
+deterministic: false

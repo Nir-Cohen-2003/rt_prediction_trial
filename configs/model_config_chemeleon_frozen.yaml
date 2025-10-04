@@ -1,0 +1,27 @@
+# Model configuration for RT prediction with frozen CheMeleon encoder
+# Only trains the prediction head - faster and less prone to overfitting
+
+model_type: "chemprop"
+
+# CheMeleon pretrained model settings
+use_chemeleon: true
+chemeleon_checkpoint: "chemeleon_100m"
+freeze_chemeleon: true  # Freeze encoder, only train FFN head
+
+# Feed-forward network settings (prediction head)
+ffn_hidden_dim: 300
+ffn_num_layers: 2
+dropout: 0.2  # Higher dropout since we're only training the head
+activation: "relu"
+
+# These settings are ignored when use_chemeleon=true
+message_hidden_dim: 300
+num_layers: 3
+aggregation: "mean"
+
+# Custom GNN
+custom_gnn_class: null
+
+# Additional features
+use_additional_features: false
+additional_feature_dim: 0

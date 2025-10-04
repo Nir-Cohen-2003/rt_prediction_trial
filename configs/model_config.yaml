@@ -1,8 +1,13 @@
-# Model configuration for RT prediction
+# Model configuration for RT prediction - Training from scratch
 
 model_type: "chemprop"
 
-# Chemprop MPNN settings
+# CheMeleon pretrained model settings (set use_chemeleon: true to enable)
+use_chemeleon: false  # Set to true to use CheMeleon pretrained model
+chemeleon_checkpoint: null  # Options: "chemeleon_100m", "chemeleon_300m", or path to local checkpoint
+freeze_chemeleon: false  # Set to true to only train the prediction head
+
+# Chemprop MPNN settings (used when use_chemeleon: false)
 message_hidden_dim: 64
 num_layers: 3
 ffn_hidden_dim: 64

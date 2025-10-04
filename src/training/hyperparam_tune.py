@@ -33,6 +33,7 @@ def parse_args():
     """Parse command line arguments."""
     p = argparse.ArgumentParser(description="Hyperparameter tuning for RT prediction (minimize val MAE)")
     p.add_argument("--data-config", type=Path, required=True, help="Path to data configuration YAML")
+    p.add_argument("--model-config", type=Path, required=True, help="Path to model configuration YAML")
     p.add_argument("--tuning-config", type=Path, required=True, help="Path to tuning configuration YAML")
     return p.parse_args()
 
@@ -156,7 +157,7 @@ def save_all_trials_summary(study: optuna.Study, output_dir: Path):
         lines.append(f"Rank {rank}: Trial #{trial.number}")
         lines.append(f"  Validation MAE: {trial.value:.6f}")
         lines.append(f"  Key params:")
-        for key in ["message_hidden_dim", "num_layers", "learning_rate", "batch_size"]:
+        for key in ["ffn_hidden_dim", "ffn_num_layers", "learning_rate", "batch_size"]:
             if key in trial.params:
                 value = trial.params[key]
                 if isinstance(value, float) and value < 0.01:
@@ -171,6 +172,7 @@ def save_all_trials_summary(study: optuna.Study, output_dir: Path):
 
 
 def build_objective(data_cfg: DataConfig,
+                    base_model_cfg: ModelConfig,
                     tuning_cfg: dict,
                     output_dir: Path):
     """
@@ -178,6 +180,7 @@ def build_objective(data_cfg: DataConfig,
     
     Args:
         data_cfg: Data configuration (constant across trials)
+        base_model_cfg: Base model configuration (contains CheMeleon settings if applicable)
         tuning_cfg: Dictionary with tuning parameters
         output_dir: Directory to save results
     
@@ -185,42 +188,73 @@ def build_objective(data_cfg: DataConfig,
         objective: Function that takes a trial and returns metric to optimize
     """
     
+    # Check if using CheMeleon
+    is_chemeleon = base_model_cfg.use_chemeleon
+    
     def objective(trial: optuna.Trial):
         try:
             # Sample hyperparameters from search space
             
-            # Model hyperparameters
-            message_hidden_dim = trial.suggest_categorical(
-                "message_hidden_dim",
-                tuning_cfg.get("message_hidden_dim_choices", [300])
-            )
-            num_layers = trial.suggest_int(
-                "num_layers",
-                tuning_cfg.get("num_layers_min", 2),
-                tuning_cfg.get("num_layers_max", 5)
-            )
-            ffn_hidden_dim = trial.suggest_categorical(
-                "ffn_hidden_dim",
-                tuning_cfg.get("ffn_hidden_dim_choices", [300])
-            )
-            ffn_num_layers = trial.suggest_int(
-                "ffn_num_layers",
-                tuning_cfg.get("ffn_num_layers_min", 1),
-                tuning_cfg.get("ffn_num_layers_max", 3)
-            )
-            dropout = trial.suggest_float(
-                "dropout",
-                tuning_cfg.get("dropout_min", 0.0),
-                tuning_cfg.get("dropout_max", 0.5)
-            )
-            activation = trial.suggest_categorical(
-                "activation",
-                tuning_cfg.get("activation_choices", ["relu"])
-            )
-            aggregation = trial.suggest_categorical(
-                "aggregation",
-                tuning_cfg.get("aggregation_choices", ["mean"])
-            )
+            # Model hyperparameters (architecture)
+            # For CheMeleon, we only tune FFN parameters, not message passing
+            if is_chemeleon:
+                # CheMeleon: Only tune prediction head
+                ffn_hidden_dim = trial.suggest_categorical(
+                    "ffn_hidden_dim",
+                    tuning_cfg.get("ffn_hidden_dim_choices", [300])
+                )
+                ffn_num_layers = trial.suggest_int(
+                    "ffn_num_layers",
+                    tuning_cfg.get("ffn_num_layers_min", 1),
+                    tuning_cfg.get("ffn_num_layers_max", 3)
+                )
+                dropout = trial.suggest_float(
+                    "dropout",
+                    tuning_cfg.get("dropout_min", 0.0),
+                    tuning_cfg.get("dropout_max", 0.3)
+                )
+                activation = trial.suggest_categorical(
+                    "activation",
+                    tuning_cfg.get("activation_choices", ["relu"])
+                )
+                
+                # Fixed from base config (CheMeleon architecture)
+                message_hidden_dim = base_model_cfg.message_hidden_dim
+                num_layers = base_model_cfg.num_layers
+                aggregation = base_model_cfg.aggregation
+            else:
+                # Standard model: tune full architecture
+                message_hidden_dim = trial.suggest_categorical(
+                    "message_hidden_dim",
+                    tuning_cfg.get("message_hidden_dim_choices", [300])
+                )
+                num_layers = trial.suggest_int(
+                    "num_layers",
+                    tuning_cfg.get("num_layers_min", 2),
+                    tuning_cfg.get("num_layers_max", 5)
+                )
+                ffn_hidden_dim = trial.suggest_categorical(
+                    "ffn_hidden_dim",
+                    tuning_cfg.get("ffn_hidden_dim_choices", [300])
+                )
+                ffn_num_layers = trial.suggest_int(
+                    "ffn_num_layers",
+                    tuning_cfg.get("ffn_num_layers_min", 1),
+                    tuning_cfg.get("ffn_num_layers_max", 3)
+                )
+                dropout = trial.suggest_float(
+                    "dropout",
+                    tuning_cfg.get("dropout_min", 0.0),
+                    tuning_cfg.get("dropout_max", 0.5)
+                )
+                activation = trial.suggest_categorical(
+                    "activation",
+                    tuning_cfg.get("activation_choices", ["relu"])
+                )
+                aggregation = trial.suggest_categorical(
+                    "aggregation",
+                    tuning_cfg.get("aggregation_choices", ["mean"])
+                )
             
             # Training hyperparameters
             learning_rate = trial.suggest_float(
@@ -238,12 +272,11 @@ def build_objective(data_cfg: DataConfig,
                 tuning_cfg.get("optimizer_choices", ["adam"])
             )
             
-            # Fix: Use log=True only if weight_decay_min > 0
+            # Weight decay
             weight_decay_min = tuning_cfg.get("weight_decay_min", 0.0)
             weight_decay_max = tuning_cfg.get("weight_decay_max", 0.01)
             
             if weight_decay_min <= 0:
-                # Don't use log scale if min is 0
                 weight_decay = trial.suggest_float(
                     "weight_decay",
                     weight_decay_min,
@@ -283,7 +316,10 @@ def build_objective(data_cfg: DataConfig,
             
             # Create model configuration with sampled hyperparameters
             model_cfg = ModelConfig(
-                model_type="chemprop",
+                model_type=base_model_cfg.model_type,
+                use_chemeleon=base_model_cfg.use_chemeleon,
+                chemeleon_checkpoint=base_model_cfg.chemeleon_checkpoint,
+                freeze_chemeleon=base_model_cfg.freeze_chemeleon,
                 message_hidden_dim=message_hidden_dim,
                 num_layers=num_layers,
                 ffn_hidden_dim=ffn_hidden_dim,
@@ -323,12 +359,11 @@ def build_objective(data_cfg: DataConfig,
                 gpu_id = trial.number % n_gpus
                 
                 # Set CUDA_VISIBLE_DEVICES for this trial to prevent cross-GPU interference
-                # This isolates the trial to a specific GPU
                 os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
                 
                 # Use GPU with single device
                 accelerator = "gpu"
-                devices = 1  # Use first device (which is the GPU we set in CUDA_VISIBLE_DEVICES)
+                devices = 1
                 
                 # Reduce num_workers for parallel trials to avoid dataloader worker overhead
                 num_workers = 0 if n_jobs > 1 else 2
@@ -367,8 +402,7 @@ def build_objective(data_cfg: DataConfig,
                 logger=False,
                 enable_checkpointing=False,
                 callbacks=[],
-                # Enable GPU memory sharing optimizations
-                benchmark=True,  # cudnn.benchmark for faster training
+                benchmark=True,
             )
             
             # Train the model
@@ -394,7 +428,7 @@ def build_objective(data_cfg: DataConfig,
                          trainer.callback_metrics.get("mae")
             
             if metric is None:
-                return float("inf")  # Return high value if metric not found (we're minimizing)
+                return float("inf")
             
             value = float(metric.item()) if isinstance(metric, torch.Tensor) else float(metric)
             
@@ -429,11 +463,19 @@ def main():
     print("[hyperparam_tune] Loading data configuration...")
     data_cfg = load_yaml_to_dataclass(args.data_config, DataConfig)
     
+    # Load base model configuration (contains CheMeleon settings)
+    print("[hyperparam_tune] Loading base model configuration...")
+    base_model_cfg = load_yaml_to_dataclass(args.model_config, ModelConfig)
+    
     # Load tuning config as dictionary
     print("[hyperparam_tune] Loading tuning configuration...")
     tuning_cfg = yaml.safe_load(Path(args.tuning_config).read_text())
     
     print(f"[hyperparam_tune] Data config: {data_cfg}")
+    print(f"[hyperparam_tune] Base model: {'CheMeleon' if base_model_cfg.use_chemeleon else 'Standard Chemprop'}")
+    if base_model_cfg.use_chemeleon:
+        print(f"[hyperparam_tune] CheMeleon checkpoint: {base_model_cfg.chemeleon_checkpoint}")
+        print(f"[hyperparam_tune] Freeze encoder: {base_model_cfg.freeze_chemeleon}")
     
     # Create output directory
     output_dir = Path(tuning_cfg.get("output_path", "results/tuning_results")).parent
@@ -447,19 +489,22 @@ def main():
     
     print(f"[hyperparam_tune] Results will be saved to: {run_dir}")
     
-    # Save the tuning configuration for reference
+    # Save the configurations for reference
     config_copy = run_dir / "tuning_config.yaml"
     config_copy.write_text(yaml.dump(tuning_cfg, default_flow_style=False, sort_keys=False))
+    
+    model_config_copy = run_dir / "base_model_config.yaml"
+    model_config_copy.write_text(yaml.dump(base_model_cfg.__dict__, default_flow_style=False, sort_keys=False))
     
     # Prepare data once (this creates the processed data if it doesn't exist)
     print("[hyperparam_tune] Preparing data (one-time processing)...")
     dm_temp = RTDataModule(
         config=data_cfg,
-        model_type="chemprop",
+        model_type=base_model_cfg.model_type,
         batch_size=64,
         num_workers=4
     )
-    dm_temp.prepare_data()  # This processes and saves the data
+    dm_temp.prepare_data()
     print("[hyperparam_tune] Data preparation complete. Trials will reuse processed data.")
     
     # Set global seed
@@ -474,15 +519,15 @@ def main():
     print("[hyperparam_tune] Creating Optuna study...")
     study = optuna.create_study(
         study_name=study_name,
-        direction=tuning_cfg.get("direction", "minimize"),  # Minimize MAE
+        direction=tuning_cfg.get("direction", "minimize"),
         storage=storage,
-        load_if_exists=True  # Resume if crashed
+        load_if_exists=True
     )
     
     print(f"[hyperparam_tune] Study storage: {storage_path}")
     
     # Build objective function
-    obj = build_objective(data_cfg, tuning_cfg, run_dir)
+    obj = build_objective(data_cfg, base_model_cfg, tuning_cfg, run_dir)
     
     # Add callback to save best result after each trial
     def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial):

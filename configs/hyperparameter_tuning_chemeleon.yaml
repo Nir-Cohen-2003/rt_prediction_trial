@@ -1,0 +1,70 @@
+# Hyperparameter Tuning Configuration for CheMeleon Fine-tuning
+# This configuration only tunes training hyperparameters, not model architecture
+# since we're using a pretrained CheMeleon encoder
+
+# Study configuration
+study_name: "rt_chemeleon_tuning_v1"
+direction: "minimize"  # minimize validation MAE
+trials: 30  # fewer trials since we're only tuning training params
+n_jobs: 4  # fewer parallel jobs due to larger model
+seed: 42
+
+# Training configuration for each trial
+epochs_per_trial: 50
+early_stop_patience: 15
+
+# Output
+output_path: "results/tuning_results_chemeleon.json"
+
+# ============================================================================
+# MODEL HYPERPARAMETERS SEARCH SPACE
+# ============================================================================
+# NOTE: Model architecture is fixed by CheMeleon pretrained weights
+# We only tune the prediction head (FFN) hyperparameters
+
+# Feed-forward network dimensions
+ffn_hidden_dim_choices: [128, 256, 300, 512]
+
+# Number of feed-forward layers
+ffn_num_layers_min: 1
+ffn_num_layers_max: 3
+
+# Dropout rate (applied to FFN only, not encoder)
+dropout_min: 0.0
+dropout_max: 0.3
+
+# Activation function for FFN
+activation_choices: ["relu", "leaky_relu", "elu"]
+
+# ============================================================================
+# TRAINING HYPERPARAMETERS SEARCH SPACE
+# ============================================================================
+
+# Learning rate (log scale) - higher range for fine-tuning
+lr_min: 0.00001   # 1e-5
+lr_max: 0.001     # 1e-3 (lower max than training from scratch)
+
+# Batch size - smaller due to larger model
+batch_size_choices: [32, 64, 128]
+
+# Optimizer
+optimizer_choices: ["adam", "adamw"]
+
+# Weight decay (log scale) - important for preventing overfitting
+weight_decay_min: 0.00001  # 1e-5
+weight_decay_max: 0.01     # 1e-2
+
+# ============================================================================
+# LEARNING RATE SCHEDULER
+# ============================================================================
+# Recommended for fine-tuning to prevent catastrophic forgetting
+
+tune_scheduler: true
+
+scheduler_type_choices: ["plateau"]  # Only plateau for fine-tuning
+
+# For ReduceLROnPlateau
+scheduler_patience_min: 3
+scheduler_patience_max: 10
+scheduler_factor_min: 0.3
+scheduler_factor_max: 0.7

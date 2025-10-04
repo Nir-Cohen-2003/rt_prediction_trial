@@ -1,0 +1,28 @@
+# Model configuration for RT prediction with CheMeleon fine-tuning
+
+model_type: "chemprop"
+
+# CheMeleon pretrained model settings
+use_chemeleon: true
+chemeleon_checkpoint: "checkpoints/chemeleon/chemeleon_100m.pt"  # Correct path
+freeze_chemeleon: false  # Set to true to only train the prediction head (faster, less overfitting)
+
+# Feed-forward network settings (prediction head)
+# Note: message_hidden_dim, num_layers, and aggregation are ignored when using CheMeleon
+# as they come from the pretrained model
+ffn_hidden_dim: 300
+ffn_num_layers: 2
+dropout: 0.1
+activation: "relu"
+
+# These settings are ignored when use_chemeleon=true
+message_hidden_dim: 300  # Overridden by CheMeleon architecture
+num_layers: 3  # Overridden by CheMeleon architecture
+aggregation: "mean"  # Overridden by CheMeleon architecture
+
+# Custom GNN (not used with CheMeleon)
+custom_gnn_class: null
+
+# Additional features
+use_additional_features: false
+additional_feature_dim: 0

@@ -53,7 +53,7 @@ lr_min: 0.00001  # 1e-5
 lr_max: 0.01     # 1e-2
 
 # Batch size
-batch_size_choices: [256]
+batch_size_choices: [1024]
 
 # Optimizer
 optimizer_choices: ["adam", "adamw"]

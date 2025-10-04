@@ -361,6 +361,8 @@ class RTDataModule(L.LightningDataModule):
                 batch_size=self.batch_size,
                 num_workers=self.num_workers,
                 shuffle=True,
+                pin_memory=True,  # Add this
+                persistent_workers=self.num_workers > 0,  # Add this
             )
         else:
             # Custom GNN - you'll implement this
@@ -374,6 +376,8 @@ class RTDataModule(L.LightningDataModule):
                 batch_size=self.batch_size,
                 num_workers=self.num_workers,
                 shuffle=False,
+                pin_memory=True,  # Add this
+                persistent_workers=self.num_workers > 0,  # Add this
             )
         else:
             raise NotImplementedError("Custom GNN dataloader not implemented yet")
@@ -386,6 +390,8 @@ class RTDataModule(L.LightningDataModule):
                 batch_size=self.batch_size,
                 num_workers=self.num_workers,
                 shuffle=False,
+                pin_memory=True,  # Add this
+                persistent_workers=self.num_workers > 0,  # Add this
             )
         else:
             raise NotImplementedError("Custom GNN dataloader not implemented yet")

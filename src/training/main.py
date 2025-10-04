@@ -46,6 +46,19 @@ def parse_args():
         default="rt_baseline",
         help="Name of the experiment"
     )
+    parser.add_argument(
+        "--description",
+        type=str,
+        default="",
+        help="Description of the experiment"
+    )
+    parser.add_argument(
+        "--tags",
+        type=str,
+        nargs="+",
+        default=[],
+        help="Tags for the experiment (space-separated)"
+    )
     
     return parser.parse_args()
 
@@ -69,12 +82,24 @@ def main():
         data=data_cfg,
         model=model_cfg,
         training=training_cfg,
-        experiment_name=args.experiment_name
+        experiment_name=args.experiment_name,
+        description=args.description,
+        tags=args.tags
     )
     
     print(f"\nStarting experiment: {config.experiment_name}")
+    if config.description:
+        print(f"Description: {config.description}")
+    if config.tags:
+        print(f"Tags: {', '.join(config.tags)}")
     print(f"Data path: {config.data.raw_data_path}")
     print(f"Model type: {config.model.model_type}")
+    
+    # Print CheMeleon-specific info
+    if config.model.use_chemeleon:
+        print(f"Using CheMeleon: {config.model.chemeleon_checkpoint}")
+        print(f"Freeze encoder: {config.model.freeze_chemeleon}")
+    
     print(f"Batch size: {config.training.batch_size}")
     print(f"Learning rate: {config.training.learning_rate}")
     print(f"Epochs: {config.training.num_epochs}\n")
@@ -83,6 +108,8 @@ def main():
     trainer, module, datamodule = train_from_config(config)
     
     print("\nTraining completed successfully!")
+    print(f"Logs saved to: {config.training.log_dir}/{config.experiment_name}")
+    print(f"Checkpoints saved to: {config.training.checkpoint_dir}/{config.experiment_name}")
 
 
 if __name__ == "__main__":
