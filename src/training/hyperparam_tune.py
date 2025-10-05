@@ -84,19 +84,33 @@ def parse_args():
     return p.parse_args()
 
 
-def save_trial_result(trial: optuna.Trial, value: float, output_dir: Path):
+def save_trial_result(trial: optuna.Trial, value: float, output_dir: Path, study: optuna.Study):
     """Save individual trial result immediately after completion."""
     trial_file = output_dir / f"trial_{trial.number:04d}.json"
+    
+    # Get the frozen trial from the study to access completion info
+    try:
+        frozen_trial = study.trials[trial.number]
+        datetime_start = frozen_trial.datetime_start.isoformat() if frozen_trial.datetime_start else None
+        datetime_complete = frozen_trial.datetime_complete.isoformat() if frozen_trial.datetime_complete else None
+        duration_seconds = (frozen_trial.datetime_complete - frozen_trial.datetime_start).total_seconds() \
+                          if frozen_trial.datetime_complete and frozen_trial.datetime_start else None
+        state = frozen_trial.state.name
+    except (IndexError, AttributeError):
+        # Fallback if frozen trial not yet available
+        datetime_start = None
+        datetime_complete = None
+        duration_seconds = None
+        state = "RUNNING"
     
     trial_data = {
         "trial_number": trial.number,
         "value": value,
         "params": trial.params,
-        "datetime_start": trial.datetime_start.isoformat() if trial.datetime_start else None,
-        "datetime_complete": trial.datetime_complete.isoformat() if trial.datetime_complete else None,
-        "duration_seconds": (trial.datetime_complete - trial.datetime_start).total_seconds() 
-                           if trial.datetime_complete and trial.datetime_start else None,
-        "state": trial.state.name,
+        "datetime_start": datetime_start,
+        "datetime_complete": datetime_complete,
+        "duration_seconds": duration_seconds,
+        "state": state,
     }
     
     safe_write_json(trial_file, trial_data)
@@ -227,7 +241,8 @@ def save_all_trials_summary(study: optuna.Study, output_dir: Path):
 def build_objective(data_cfg: DataConfig,
                     base_model_cfg: ModelConfig,
                     tuning_cfg: dict,
-                    output_dir: Path):
+                    output_dir: Path,
+                    study: optuna.Study):
     """
     Build the objective function for Optuna optimization.
     
@@ -236,6 +251,7 @@ def build_objective(data_cfg: DataConfig,
         base_model_cfg: Base model configuration (contains CheMeleon settings if applicable)
         tuning_cfg: Dictionary with tuning parameters
         output_dir: Directory to save results
+        study: Optuna study object (needed to access frozen trial info)
     
     Returns:
         objective: Function that takes a trial and returns metric to optimize
@@ -485,7 +501,7 @@ def build_objective(data_cfg: DataConfig,
             value = float(metric.item()) if isinstance(metric, torch.Tensor) else float(metric)
             
             # Save this trial's result immediately
-            save_trial_result(trial, value, output_dir)
+            save_trial_result(trial, value, output_dir, study)
             
             return value
         
@@ -578,8 +594,8 @@ def main():
     
     print(f"[hyperparam_tune] Study storage: {storage_path}")
     
-    # Build objective function
-    obj = build_objective(data_cfg, base_model_cfg, tuning_cfg, run_dir)
+    # Build objective function (now needs study reference)
+    obj = build_objective(data_cfg, base_model_cfg, tuning_cfg, run_dir, study)
     
     # Add callback to save best result and summary after each trial
     def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial):
