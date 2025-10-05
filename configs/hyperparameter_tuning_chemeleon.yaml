@@ -5,12 +5,12 @@
 # Study configuration
 study_name: "rt_chemeleon_tuning_v3"
 direction: "minimize"  # minimize validation MAE
-trials: 15  
+trials: 3  
 n_jobs: 1  
 seed: 42
 
 # Training configuration for each trial
-epochs_per_trial: 100
+epochs_per_trial: 5
 early_stop_patience: 15
 
 # Output

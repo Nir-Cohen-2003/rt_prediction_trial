@@ -409,9 +409,9 @@ def main():
     print(f"Model type: {config.model.model_type}")
     
     # Print CheMeleon-specific info
-    if config.model.use_chemeleon:
-        print(f"Using CheMeleon: {config.model.chemeleon_checkpoint}")
-        print(f"Freeze encoder: {config.model.freeze_chemeleon}")
+    if config.model.model_type == "chemprop" and config.model.chemprop.use_chemeleon:
+        print(f"Using CheMeleon: {config.model.chemprop.chemeleon_checkpoint}")
+        print(f"Freeze encoder: {config.model.chemprop.freeze_chemeleon}")
     
     print(f"Batch size: {config.training.batch_size}")
     print(f"Learning rate: {config.training.learning_rate}")

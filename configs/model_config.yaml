@@ -1,24 +1,46 @@
-# Model configuration for RT prediction - Training from scratch
+# Model configuration for RT prediction
 
-model_type: "chemprop"
+model_type: "pyg"  # Options: "chemprop" or "pyg"
 
-# CheMeleon pretrained model settings (set use_chemeleon: true to enable)
-use_chemeleon: false  # Set to true to use CheMeleon pretrained model
-chemeleon_checkpoint: null  # Options: "chemeleon_100m", "chemeleon_300m", or path to local checkpoint
-freeze_chemeleon: false  # Set to true to only train the prediction head
-
-# Chemprop MPNN settings (used when use_chemeleon: false)
+# Common settings for ALL models
 message_hidden_dim: 64
 num_layers: 3
 ffn_hidden_dim: 64
 ffn_num_layers: 2
 dropout: 0.0
-activation: "relu"
-aggregation: "sum"
 
-# Custom GNN (if model_type != "chemprop")
-custom_gnn_class: null
+# Chemprop-specific configuration
+chemprop:
+  aggregation: "mean"  # Options: "mean", "sum", "norm", "attentive"
+  use_chemeleon: false
+  chemeleon_checkpoint: null  # Options: "chemeleon_100m", "chemeleon_300m", or path
+  freeze_chemeleon: false
+  chemeleon_num_layers: null
 
-# Additional features
-use_additional_features: false
-additional_feature_dim: 0
+# PyG-specific configuration
+pyg:
+  # Node and edge feature dimensions
+  node_in_dim: 133  # RDKit default atom features
+  edge_in_dim: 14   # RDKit default bond features
+  edge_dim: null    # For TransformerConv, defaults to edge_in_dim if None
+  
+  # Pooling configuration
+  pool_type: "mean"  # Options: "mean", "sum", "max", "transformer", "sag", "topk"
+  pool_ratio: 0.5
+  pool_num_heads: 4
+  pool_dim_feedforward: 16
+  
+  # Generic GNN settings
+  gnn_type: "gcn"  # Options: "gcn", "gin", "transformer", "deepgcn"
+  activation: "relu"  # Options: "relu", "silu", "gelu"
+  num_heads: 4  # For transformer
+  use_edge_features: true
+  
+  # DeeperGCN specific settings
+  deepgcn:
+    norm_type: "layer"  # Options: "batch", "layer", "instance"
+    beta: 1.0
+    learn_beta: true
+    gen_aggr: "softmax"  # Options: "softmax", "power"
+    mlp_layers: 1
+    num_timesteps: 2

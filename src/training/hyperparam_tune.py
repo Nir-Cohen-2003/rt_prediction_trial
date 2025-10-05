@@ -11,6 +11,7 @@ import os
 from datetime import datetime
 import fcntl  # For file locking
 import time
+from dataclasses import asdict
 from ..config import DataConfig, ModelConfig, TrainingConfig, ChemPropModelConfig,PyGModelConfig
 from .trainer import ChempropRTModule
 from ..data.datamodule import RTDataModule
@@ -24,7 +25,15 @@ def load_yaml_to_dataclass(path: Path | None, cls):
     
     data = yaml.safe_load(Path(path).read_text())
     
-    # Try to create instance directly from dict (works if cls supports **kwargs)
+    # Special handling for ModelConfig with nested configs
+    if cls == ModelConfig and 'chemprop' in data and isinstance(data['chemprop'], dict):
+        from ..config import ChemPropModelConfig
+        data['chemprop'] = ChemPropModelConfig(**data['chemprop'])
+    elif cls == ModelConfig and 'pyg' in data and isinstance(data['pyg'], dict):
+        from ..config import PyGModelConfig
+        data['pyg'] = PyGModelConfig(**data['pyg'])
+    
+    # Try to create instance directly from dict
     try:
         return cls(**data)
     except TypeError as e:
@@ -119,123 +128,138 @@ def save_trial_result(trial: optuna.Trial, value: float, output_dir: Path, study
 def save_current_best(study: optuna.Study, output_dir: Path):
     """Save current best results in both JSON and human-readable format."""
     
-    # Machine-readable JSON
-    best_json = output_dir / "best_result.json"
-    best_data = {
-        "best_trial_number": study.best_trial.number,
-        "best_value": study.best_value,
-        "best_params": study.best_trial.params,
-        "num_completed_trials": len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]),
-        "num_total_trials": len(study.trials),
-        "last_updated": datetime.now().isoformat(),
-    }
-    safe_write_json(best_json, best_data)
+    # Check if there are any completed trials
+    completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    if not completed_trials:
+        print("[save_current_best] No completed trials yet, skipping save")
+        return
     
-    # Human-readable text
-    best_txt = output_dir / "best_result.txt"
-    lines = [
-        "=" * 80,
-        "CURRENT BEST HYPERPARAMETERS",
-        "=" * 80,
-        f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"Completed trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])} / {len(study.trials)}",
-        "",
-        f"Best Trial Number: {study.best_trial.number}",
-        f"Best Validation MAE: {study.best_value:.6f}",
-        "",
-        "Best Hyperparameters:",
-        "-" * 80,
-    ]
-    
-    # Group parameters by category
-    model_params = {}
-    training_params = {}
-    scheduler_params = {}
-    
-    for key, value in study.best_trial.params.items():
-        if key in ["message_hidden_dim", "num_layers", "ffn_hidden_dim", "ffn_num_layers", 
-                   "dropout", "activation", "aggregation"]:
-            model_params[key] = value
-        elif key.startswith("scheduler_"):
-            scheduler_params[key] = value
-        else:
-            training_params[key] = value
-    
-    if model_params:
-        lines.append("\n[Model Architecture]")
-        for key, value in sorted(model_params.items()):
-            lines.append(f"  {key:25s}: {value}")
-    
-    if training_params:
-        lines.append("\n[Training]")
-        for key, value in sorted(training_params.items()):
-            if isinstance(value, float) and value < 0.01:
-                lines.append(f"  {key:25s}: {value:.6f}")
+    try:
+        # Machine-readable JSON
+        best_json = output_dir / "best_result.json"
+        best_data = {
+            "best_trial_number": study.best_trial.number,
+            "best_value": study.best_value,
+            "best_params": study.best_trial.params,
+            "num_completed_trials": len(completed_trials),
+            "num_total_trials": len(study.trials),
+            "last_updated": datetime.now().isoformat(),
+        }
+        safe_write_json(best_json, best_data)
+        
+        # Human-readable text
+        best_txt = output_dir / "best_result.txt"
+        lines = [
+            "=" * 80,
+            "CURRENT BEST HYPERPARAMETERS",
+            "=" * 80,
+            f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Completed trials: {len(completed_trials)} / {len(study.trials)}",
+            "",
+            f"Best Trial Number: {study.best_trial.number}",
+            f"Best Validation MAE: {study.best_value:.6f}",
+            "",
+            "Best Hyperparameters:",
+            "-" * 80,
+        ]
+        
+        # Group parameters by category
+        model_params = {}
+        training_params = {}
+        scheduler_params = {}
+        
+        for key, value in study.best_trial.params.items():
+            if key in ["message_hidden_dim", "num_layers", "ffn_hidden_dim", "ffn_num_layers", 
+                       "dropout", "activation", "aggregation"]:
+                model_params[key] = value
+            elif key.startswith("scheduler_"):
+                scheduler_params[key] = value
             else:
+                training_params[key] = value
+        
+        if model_params:
+            lines.append("\n[Model Architecture]")
+            for key, value in sorted(model_params.items()):
                 lines.append(f"  {key:25s}: {value}")
-    
-    if scheduler_params:
-        lines.append("\n[Learning Rate Scheduler]")
-        for key, value in sorted(scheduler_params.items()):
-            lines.append(f"  {key:25s}: {value}")
-    
-    lines.append("\n" + "=" * 80)
-    
-    safe_write_text(best_txt, "\n".join(lines))
+        
+        if training_params:
+            lines.append("\n[Training]")
+            for key, value in sorted(training_params.items()):
+                if isinstance(value, float) and value < 0.01:
+                    lines.append(f"  {key:25s}: {value:.6f}")
+                else:
+                    lines.append(f"  {key:25s}: {value}")
+        
+        if scheduler_params:
+            lines.append("\n[Learning Rate Scheduler]")
+            for key, value in sorted(scheduler_params.items()):
+                lines.append(f"  {key:25s}: {value}")
+        
+        lines.append("\n" + "=" * 80)
+        
+        safe_write_text(best_txt, "\n".join(lines))
+        print(f"[save_current_best] Saved best results to {output_dir}")
+    except Exception as e:
+        print(f"[save_current_best] Error saving best results: {e}")
 
 
 def save_all_trials_summary(study: optuna.Study, output_dir: Path):
     """Save summary of all trials in human-readable format."""
-    summary_file = output_dir / "trials_summary.txt"
     
-    completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-    failed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
-    
-    lines = [
-        "=" * 80,
-        "HYPERPARAMETER TUNING SUMMARY",
-        "=" * 80,
-        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        "",
-        f"Total trials: {len(study.trials)}",
-        f"Completed: {len(completed_trials)}",
-        f"Failed: {len(failed_trials)}",
-        "",
-    ]
-    
-    if completed_trials:
-        lines.extend([
-            f"Best trial: #{study.best_trial.number}",
-            f"Best validation MAE: {study.best_value:.6f}",
-            "",
-            "=" * 80,
-            "TOP 10 TRIALS",
-            "=" * 80,
-            "",
-        ])
+    try:
+        summary_file = output_dir / "trials_summary.txt"
         
-        # Sort completed trials by value
-        sorted_trials = sorted(completed_trials, key=lambda t: t.value)[:10]
+        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+        failed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
         
-        for rank, trial in enumerate(sorted_trials, 1):
-            lines.append(f"Rank {rank}: Trial #{trial.number}")
-            lines.append(f"  Validation MAE: {trial.value:.6f}")
-            lines.append(f"  Key params:")
-            for key in ["ffn_hidden_dim", "ffn_num_layers", "learning_rate", "batch_size"]:
-                if key in trial.params:
-                    value = trial.params[key]
-                    if isinstance(value, float) and value < 0.01:
-                        lines.append(f"    {key}: {value:.6f}")
-                    else:
-                        lines.append(f"    {key}: {value}")
+        lines = [
+            "=" * 80,
+            "HYPERPARAMETER TUNING SUMMARY",
+            "=" * 80,
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            f"Total trials: {len(study.trials)}",
+            f"Completed: {len(completed_trials)}",
+            f"Failed: {len(failed_trials)}",
+            "",
+        ]
+        
+        if completed_trials:
+            lines.extend([
+                f"Best trial: #{study.best_trial.number}",
+                f"Best validation MAE: {study.best_value:.6f}",
+                "",
+                "=" * 80,
+                "TOP 10 TRIALS",
+                "=" * 80,
+                "",
+            ])
+            
+            # Sort completed trials by value
+            sorted_trials = sorted(completed_trials, key=lambda t: t.value)[:10]
+            
+            for rank, trial in enumerate(sorted_trials, 1):
+                lines.append(f"Rank {rank}: Trial #{trial.number}")
+                lines.append(f"  Validation MAE: {trial.value:.6f}")
+                lines.append(f"  Key params:")
+                for key in ["ffn_hidden_dim", "ffn_num_layers", "learning_rate", "batch_size"]:
+                    if key in trial.params:
+                        value = trial.params[key]
+                        if isinstance(value, float) and value < 0.01:
+                            lines.append(f"    {key}: {value:.6f}")
+                        else:
+                            lines.append(f"    {key}: {value}")
+                lines.append("")
+        else:
+            lines.append("No completed trials yet.")
             lines.append("")
-    else:
-        lines.append("No completed trials yet.")
-        lines.append("")
-    
-    lines.append("=" * 80)
-    
-    safe_write_text(summary_file, "\n".join(lines))
+        
+        lines.append("=" * 80)
+        
+        safe_write_text(summary_file, "\n".join(lines))
+        print(f"[save_all_trials_summary] Saved trials summary to {summary_file}")
+    except Exception as e:
+        print(f"[save_all_trials_summary] Error saving trials summary: {e}")
 
 
 def build_objective(data_cfg: DataConfig,
@@ -579,10 +603,17 @@ def main():
     tuning_cfg = yaml.safe_load(Path(args.tuning_config).read_text())
     
     print(f"[hyperparam_tune] Data config: {data_cfg}")
-    print(f"[hyperparam_tune] Base model: {'CheMeleon' if base_model_cfg.use_chemeleon else 'Standard Chemprop'}")
-    if base_model_cfg.use_chemeleon:
-        print(f"[hyperparam_tune] CheMeleon checkpoint: {base_model_cfg.chemeleon_checkpoint}")
-        print(f"[hyperparam_tune] Freeze encoder: {base_model_cfg.freeze_chemeleon}")
+    
+    # Check if using CheMeleon (handle both chemprop and pyg models)
+    is_chemeleon = (base_model_cfg.model_type == "chemprop" and 
+                    base_model_cfg.chemprop.use_chemeleon)
+    
+    print(f"[hyperparam_tune] Model type: {base_model_cfg.model_type}")
+    print(f"[hyperparam_tune] Base model: {'CheMeleon' if is_chemeleon else f'Standard {base_model_cfg.model_type.upper()}'}")
+    
+    if is_chemeleon:
+        print(f"[hyperparam_tune] CheMeleon checkpoint: {base_model_cfg.chemprop.chemeleon_checkpoint}")
+        print(f"[hyperparam_tune] Freeze encoder: {base_model_cfg.chemprop.freeze_chemeleon}")
     
     # Create output directory
     output_dir = Path(tuning_cfg.get("output_path", "results/tuning_results")).parent
@@ -600,8 +631,29 @@ def main():
     config_copy = run_dir / "tuning_config.yaml"
     safe_write_text(config_copy, yaml.dump(tuning_cfg, default_flow_style=False, sort_keys=False))
     
+    # Convert model config to dict for saving
+    model_config_dict = {
+        'model_type': base_model_cfg.model_type,
+        'message_hidden_dim': base_model_cfg.message_hidden_dim,
+        'num_layers': base_model_cfg.num_layers,
+        'ffn_hidden_dim': base_model_cfg.ffn_hidden_dim,
+        'ffn_num_layers': base_model_cfg.ffn_num_layers,
+        'dropout': base_model_cfg.dropout,
+    }
+    
+    if base_model_cfg.model_type == "chemprop":
+        model_config_dict['chemprop'] = {
+            'aggregation': base_model_cfg.chemprop.aggregation,
+            'use_chemeleon': base_model_cfg.chemprop.use_chemeleon,
+            'chemeleon_checkpoint': base_model_cfg.chemprop.chemeleon_checkpoint,
+            'freeze_chemeleon': base_model_cfg.chemprop.freeze_chemeleon,
+            'chemeleon_num_layers': base_model_cfg.chemprop.chemeleon_num_layers,
+        }
+    elif base_model_cfg.model_type == "pyg":
+        model_config_dict['pyg'] = asdict(base_model_cfg.pyg)
+    
     model_config_copy = run_dir / "base_model_config.yaml"
-    safe_write_text(model_config_copy, yaml.dump(base_model_cfg.__dict__, default_flow_style=False, sort_keys=False))
+    safe_write_text(model_config_copy, yaml.dump(model_config_dict, default_flow_style=False, sort_keys=False))
     
     # Prepare data once (this creates the processed data if it doesn't exist)
     print("[hyperparam_tune] Preparing data (one-time processing)...")
@@ -639,10 +691,29 @@ def main():
     # Add callback to save best result and summary after each trial
     def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial):
         if trial.state == optuna.trial.TrialState.COMPLETE:
-            # Save both the best result and the full summary after each trial
-            save_current_best(study, run_dir)
-            save_all_trials_summary(study, run_dir)
-            print(f"[Trial {trial.number}] Value: {trial.value:.6f} | Best so far: {study.best_value:.6f}")
+            print(f"\n[Trial {trial.number}] COMPLETED - Value: {trial.value:.6f}")
+            
+            # Check if we have at least one completed trial before accessing best_value
+            completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            if completed_trials:
+                print(f"[Trial {trial.number}] Best so far: {study.best_value:.6f} (Trial #{study.best_trial.number})")
+                
+                # Save both the best result and the full summary after each trial
+                try:
+                    save_current_best(study, run_dir)
+                    save_all_trials_summary(study, run_dir)
+                except Exception as e:
+                    print(f"[Trial {trial.number}] Error in callback: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"[Trial {trial.number}] Warning: Trial marked complete but not in completed trials list")
+        elif trial.state == optuna.trial.TrialState.FAIL:
+            print(f"\n[Trial {trial.number}] FAILED")
+            if trial.values is not None:
+                print(f"  Error: {trial.values}")
+        elif trial.state == optuna.trial.TrialState.PRUNED:
+            print(f"\n[Trial {trial.number}] PRUNED")
     
     # Run optimization with parallel trials support
     n_jobs = tuning_cfg.get("n_jobs", 1)
@@ -653,21 +724,45 @@ def main():
     print(f"  Parallel jobs: {n_jobs}")
     print(f"  Available GPUs: {n_gpus}")
     print(f"  Trials per GPU: ~{n_jobs / n_gpus:.1f}")
+    print(f"  Output directory: {run_dir}")
     print()
     
-    study.optimize(
-        obj,
-        n_trials=n_trials,
-        n_jobs=n_jobs,
-        callbacks=[callback]
-    )
+    try:
+        study.optimize(
+            obj,
+            n_trials=n_trials,
+            n_jobs=n_jobs,
+            callbacks=[callback],
+            catch=(Exception,)  # Catch exceptions to continue with other trials
+        )
+    except KeyboardInterrupt:
+        print("\n[hyperparam_tune] Optimization interrupted by user")
+    except Exception as e:
+        print(f"\n[hyperparam_tune] Optimization failed with error: {e}")
+        import traceback
+        traceback.print_exc()
     
     # Final summary
+    completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    
     print("\n" + "="*80)
     print("OPTIMIZATION COMPLETE")
     print("="*80)
-    print(f"Best trial: {study.best_trial.number}")
-    print(f"Best val MAE: {study.best_value:.6f}")
+    
+    if completed_trials:
+        print(f"Completed trials: {len(completed_trials)} / {len(study.trials)}")
+        print(f"Best trial: {study.best_trial.number}")
+        print(f"Best val MAE: {study.best_value:.6f}")
+        print(f"\nBest hyperparameters:")
+        for key, value in study.best_trial.params.items():
+            print(f"  {key}: {value}")
+        
+        # Save final results
+        save_current_best(study, run_dir)
+        save_all_trials_summary(study, run_dir)
+    else:
+        print("No trials completed successfully!")
+    
     print(f"\nAll results saved to: {run_dir}")
     print(f"  - Individual trials: trial_XXXX.json")
     print(f"  - Current best: best_result.json and best_result.txt")
