@@ -32,7 +32,7 @@ def build_model(model_config: ModelConfig) -> nn.Module:
         from .chemprop_model import build_chemprop_mpnn
         return build_chemprop_mpnn(model_config)
     elif model_type == "pyg":
-        if model_config.pyg.gnn_type == "deep_gcn":
+        if model_config.pyg.gnn_type == "deepgcn":
             from .deep_gcn_pyg import build_deep_gcn
             return build_deep_gcn(model_config)
         else:

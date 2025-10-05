@@ -4,7 +4,7 @@ model_type: "pyg"  # Options: "chemprop" or "pyg"
 
 # Common settings for ALL models
 message_hidden_dim: 64
-num_layers: 3
+num_layers: 8
 ffn_hidden_dim: 64
 ffn_num_layers: 2
 dropout: 0.0
@@ -31,7 +31,7 @@ pyg:
   pool_dim_feedforward: 16
   
   # Generic GNN settings
-  gnn_type: "gcn"  # Options: "gcn", "gin", "transformer", "deepgcn"
+  gnn_type: "deepgcn"  # Options: "gcn", "gin", "transformer", "deepgcn"
   activation: "relu"  # Options: "relu", "silu", "gelu"
   num_heads: 4  # For transformer
   use_edge_features: true

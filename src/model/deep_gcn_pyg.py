@@ -86,16 +86,26 @@ class GENConv(MessagePassing):
             # SoftMax aggregation
             out = softmax(inputs * self.beta, index, dim=self.node_dim)
             out = out * inputs
-            return torch.zeros_like(inputs).scatter_add_(self.node_dim, 
-                                                         index.unsqueeze(-1).expand_as(inputs), 
-                                                         out)
+            # Create output tensor with correct shape [num_nodes, feature_dim]
+            if dim_size is None:
+                dim_size = int(index.max()) + 1
+            output = torch.zeros(dim_size, inputs.size(-1), 
+                               dtype=inputs.dtype, device=inputs.device)
+            return output.scatter_add_(0, 
+                                      index.unsqueeze(-1).expand_as(inputs), 
+                                      out)
         
         elif self.aggregator == 'power':
             # PowerMean aggregation
             min_value, max_value = 1e-7, 1e1
             torch.clamp_(inputs, min_value, max_value)
-            output = torch.zeros_like(inputs).scatter_add_(
-                self.node_dim,
+            # Create output tensor with correct shape [num_nodes, feature_dim]
+            if dim_size is None:
+                dim_size = int(index.max()) + 1
+            output = torch.zeros(dim_size, inputs.size(-1),
+                               dtype=inputs.dtype, device=inputs.device)
+            output = output.scatter_add_(
+                0,
                 index.unsqueeze(-1).expand_as(inputs),
                 inputs.pow(self.beta)
             )
