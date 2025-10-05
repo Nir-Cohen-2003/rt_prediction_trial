@@ -25,108 +25,102 @@ class DataConfig:
     val_file: str = "val.parquet"
     test_file: str = "test.parquet"
     
-    # Preprocessing flags (you'll implement the logic)
+    # Preprocessing flags
     remove_duplicates: bool = True
     filter_invalid_inchi: bool = True
-    min_rt: Optional[float] = None  # filter RT < min_rt
-    max_rt: Optional[float] = None  # filter RT > max_rt
+    min_rt: Optional[float] = None
+    max_rt: Optional[float] = None
     
     def __post_init__(self):
         """Convert string paths to Path objects."""
         self.raw_data_path = Path(self.raw_data_path)
         self.output_dir = Path(self.output_dir)
 
+
 @dataclass
 class DeepGCNConfig:
     """Configuration specific to DeepGCN models."""
     
     norm_type: Literal["batch", "layer", "instance"] = "layer"
-    beta: float = 1.0  # Initial inverse temperature for GENConv
-    learn_beta: bool = True  # Whether beta is learnable
-    gen_aggr: Literal["softmax", "power"] = "softmax"  # GENConv aggregation type
-    mlp_layers: int = 1  # Number of MLP layers in GENConv
-    num_timesteps: int = 2  # For AttentiveFP readout
-    
+    beta: float = 1.0
+    learn_beta: bool = True
+    gen_aggr: Literal["softmax", "power"] = "softmax"
+    mlp_layers: int = 1
+    num_timesteps: int = 2
+
+
 @dataclass
 class PyGModelConfig:
     """Configuration specific to PyTorch Geometric models."""
     
-    # Node and edge feature dimensions (usually inferred from data)
+    # Node and edge feature dimensions
     node_in_dim: int = 133  # RDKit default atom features
     edge_in_dim: int = 14   # RDKit default bond features
+    edge_dim: Optional[int] = None  # For TransformerConv, defaults to edge_in_dim if None
     
     # Pooling configuration
     pool_type: Literal["mean", "sum", "max", "transformer", "sag", "topk"] = "mean"
-    pool_ratio: float = 0.5  # For SAG and TopK pooling
-    pool_num_heads: int = 4  # For Transformer pooling
-    pool_dim_feedforward: int = 16  # For Transformer pooling
+    pool_ratio: float = 0.5
+    pool_num_heads: int = 4
+    pool_dim_feedforward: int = 16
     
     # DeeperGCN specific settings
     deepgcn: DeepGCNConfig = field(default_factory=DeepGCNConfig)
     
-    # Generic GNN settings (for GCN, GAT, GIN, etc.)
+    # Generic GNN settings
     gnn_type: Literal["gcn", "gin", "transformer", "deepgcn"] = "gcn"
+    activation: Literal["relu", "silu", "gelu"] = "relu"  # MOVED FROM ModelConfig
     num_heads: int = 4  # For transformer
-    use_edge_features: bool = True  # Whether to use edge features in message passing
+    use_edge_features: bool = True
+    
+    def __post_init__(self):
+        if self.gnn_type == "deepgcn" and not isinstance(self.deepgcn, DeepGCNConfig):
+            self.deepgcn = DeepGCNConfig(**self.deepgcn) if isinstance(self.deepgcn, dict) else self.deepgcn
+
+
+@dataclass
+class ChemPropModelConfig:
+    """Configuration specific to Chemprop models."""
+    
+    aggregation: Literal["mean", "sum", "norm", "attentive"] = "mean"
+    use_chemeleon: bool = False
+    chemeleon_checkpoint: Optional[str] = None
+    freeze_chemeleon: bool = False
+    chemeleon_num_layers: Optional[int] = None
+    
+    def __post_init__(self):
+        """Validate CheMeleon settings."""
+        if self.use_chemeleon and not self.chemeleon_checkpoint:
+            raise ValueError("chemeleon_checkpoint must be provided if use_chemeleon is True.")
+
 
 @dataclass
 class ModelConfig:
-    """Configuration for the prediction model (Chemprop or custom GNN)."""
-    
-    model_type: Literal["chemprop", "gcn", "gat", "gin", "mpnn", "deepgcn", "deep_gcn"] = "chemprop"
-    
-    # CheMeleon specific settings
-    use_chemeleon: bool = False
-    chemeleon_checkpoint: Optional[str] = None  # Path or URL to CheMeleon checkpoint
-    freeze_chemeleon: bool = False  # Whether to freeze the pretrained encoder
-    chemeleon_num_layers: Optional[int] = None  # Number of layers in pretrained model (if known)
-    
-    # Common settings for all models
+    """Configuration for the prediction model (Chemprop or PyG)."""
+
+    model_type: Literal["chemprop", "pyg"] = "chemprop"
+
+    # Common settings for ALL models
     message_hidden_dim: int = 64
     num_layers: int = 2
     ffn_hidden_dim: int = 64
     ffn_num_layers: int = 2
     dropout: float = 0.0
-    activation: Literal["relu", "leakyrelu", "elu"] = "relu"
-    
-    # Chemprop specific settings
-    aggregation: Literal["mean", "sum", "norm", "attentive"] = "mean"
-    
-    # PyTorch Geometric specific settings
+
+    # Model-specific settings (mutually exclusive)
+    chemprop: ChemPropModelConfig = field(default_factory=ChemPropModelConfig)
     pyg: PyGModelConfig = field(default_factory=PyGModelConfig)
     
-    # For custom GNN (you'll implement)
-    custom_gnn_class: Optional[str] = None  # e.g., "SimpleGNNRegressor"
-    
-    # Input features
-    use_additional_features: bool = False
-    additional_feature_dim: int = 0
-    
     def __post_init__(self):
-        """Validate model_type and settings."""
-        # attentive is possible only in chemprop
-        if self.model_type != "chemprop" and self.aggregation == "attentive":
-            raise ValueError("Attentive aggregation is only supported in Chemprop models.")
-        
-        # Validate CheMeleon settings
-        if self.use_chemeleon:
-            if self.chemeleon_checkpoint is None:
-                raise ValueError("chemeleon_checkpoint must be provided when use_chemeleon=True")
-            if self.model_type != "chemprop":
-                raise ValueError("CheMeleon can only be used with model_type='chemprop'")
-        
-        # Validate model_type is recognized
-        valid_types = ["chemprop", "gcn", "gat", "gin", "mpnn", "deepgcn", "deep_gcn"]
-        if self.model_type not in valid_types:
-            raise ValueError(f"model_type must be one of {valid_types}, got '{self.model_type}'")
-        
-        # Ensure pyg config is initialized
-        if not isinstance(self.pyg, PyGModelConfig):
-            self.pyg = PyGModelConfig(**self.pyg) if isinstance(self.pyg, dict) else PyGModelConfig()
-        
-        # Validate edge feature usage for specific GNN types
-        if self.model_type in ["gcn", "gin"] and self.pyg.gnn_type not in ["gcn", "gin", "transformer"]:
-            raise ValueError(f"gnn_type '{self.pyg.gnn_type}' not compatible with model_type '{self.model_type}'")
+        """Validate model_type and initialize appropriate config."""
+        if self.model_type == "chemprop":
+            if isinstance(self.chemprop, dict):
+                self.chemprop = ChemPropModelConfig(**self.chemprop)
+        elif self.model_type == "pyg":
+            if isinstance(self.pyg, dict):
+                self.pyg = PyGModelConfig(**self.pyg)
+        else:
+            raise ValueError(f"Invalid model_type: {self.model_type}. Must be 'chemprop' or 'pyg'")
 
 
 @dataclass

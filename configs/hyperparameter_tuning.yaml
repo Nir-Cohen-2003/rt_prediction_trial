@@ -39,7 +39,7 @@ dropout_min: 0.0
 dropout_max: 0.5
 
 # Activation function
-activation_choices: ["relu", "leaky_relu", "elu"]
+activation_choices: ["relu", "silu", "gelu"]
 
 # Aggregation method
 aggregation_choices: ["mean", "sum", "norm"]

@@ -1,7 +1,5 @@
 """
 Generic PyTorch Geometric model builder for various GNN architectures.
-
-Supports GCN, GIN, and Transformer-based convolutions with flexible pooling options.
 """
 
 import torch
@@ -14,26 +12,7 @@ from .pyg_components import TransformerPool, SAGPool, TopKPool, get_activation
 
 
 class GenericPyGModel(nn.Module):
-    """
-    Generic PyTorch Geometric model supporting multiple GNN architectures.
-    
-    Args:
-        node_in_dim: Input node feature dimension
-        edge_in_dim: Input edge feature dimension
-        hid_dim: Hidden dimension
-        num_layers: Number of GNN layers
-        gnn_type: Type of GNN layer ('gcn', 'gin', 'transformer')
-        dropout: Dropout rate
-        activation: Activation function ('relu', 'silu', 'gelu')
-        pool_type: Type of pooling ('mean', 'sum', 'max', 'transformer', 'sag', 'topk')
-        pool_ratio: Ratio for hierarchical pooling (SAG, TopK)
-        pool_num_heads: Number of heads for transformer pooling
-        pool_dim_feedforward: Feedforward dimension for transformer pooling
-        num_heads: Number of attention heads for TransformerConv
-        edge_dim: Edge feature dimension for models that support it
-        ffn_hidden_dim: Hidden dimension for output MLP
-        ffn_num_layers: Number of layers in output MLP
-    """
+    """Generic PyTorch Geometric model supporting multiple GNN architectures."""
     
     def __init__(self,
                  node_in_dim,
@@ -74,7 +53,6 @@ class GenericPyGModel(nn.Module):
                 conv = gnn.GCNConv(hid_dim, hid_dim)
             
             elif self.gnn_type == 'gin':
-                # GIN uses an MLP for the update function
                 mlp = nn.Sequential(
                     nn.Linear(hid_dim, hid_dim),
                     nn.BatchNorm1d(hid_dim),
@@ -84,14 +62,13 @@ class GenericPyGModel(nn.Module):
                 conv = gnn.GINConv(mlp, train_eps=True)
             
             elif self.gnn_type == 'transformer':
-                # TransformerConv supports edge features
                 conv = gnn.TransformerConv(
                     in_channels=hid_dim,
                     out_channels=hid_dim // num_heads,
                     heads=num_heads,
                     dropout=dropout,
                     edge_dim=hid_dim if edge_dim else None,
-                    beta=True  # Gated attention
+                    beta=True
                 )
             
             else:
@@ -135,13 +112,7 @@ class GenericPyGModel(nn.Module):
         self.out_mlp = nn.Sequential(*mlp_layers)
     
     def forward(self, data):
-        """
-        Args:
-            data: PyG Data object with x, edge_index, edge_attr, batch
-        
-        Returns:
-            Predicted retention times [batch_size, 1]
-        """
+        """Forward pass."""
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
         
         # Initial encoding
@@ -169,7 +140,7 @@ class GenericPyGModel(nn.Module):
             # Dropout
             x = F.dropout(x, p=self.dropout, training=self.training)
             
-            # Residual connection (skip first layer to avoid dimension mismatch)
+            # Residual connection
             if i > 0:
                 x = x + x_prev
         
@@ -198,12 +169,12 @@ def build_pyg_model(model_config: ModelConfig) -> nn.Module:
     pyg_cfg = model_config.pyg
     
     # Validate activation
-    activation = model_config.activation.lower()
+    activation = pyg_cfg.activation.lower()
     if activation not in ['relu', 'silu', 'gelu']:
         raise ValueError(f"Unsupported activation: '{activation}'. Must be one of: 'relu', 'silu', 'gelu'")
     
-    # Determine edge dimension
-    edge_dim = pyg_cfg.edge_dim if pyg_cfg.edge_dim else pyg_cfg.edge_in_dim
+    # Determine edge dimension (defaults to edge_in_dim if not specified)
+    edge_dim = pyg_cfg.edge_dim if pyg_cfg.edge_dim is not None else pyg_cfg.edge_in_dim
     
     model = GenericPyGModel(
         node_in_dim=pyg_cfg.node_in_dim,

@@ -13,6 +13,7 @@ from torch_geometric.nn import MessagePassing, global_mean_pool, global_add_pool
 from torch_geometric.utils import softmax
 from ..config import ModelConfig
 from .pyg_components import TransformerPool, SAGPool, TopKPool, get_activation
+
 class GENConv(MessagePassing):
     """
     Generalized Message Aggregator with SoftMax and PowerMean aggregation.
@@ -272,7 +273,7 @@ def build_deep_gcn(model_config: ModelConfig) -> nn.Module:
     pyg_cfg = model_config.pyg
     
     # Validate activation
-    activation = model_config.activation.lower()
+    activation = pyg_cfg.activation.lower()
     if activation not in ['relu', 'silu', 'gelu']:
         raise ValueError(f"Unsupported activation: '{activation}'. Must be one of: 'relu', 'silu', 'gelu'")
     
@@ -298,5 +299,5 @@ def build_deep_gcn(model_config: ModelConfig) -> nn.Module:
     
     return model
 
-
+__all__ = ['DeeperGCN', 'GENConv', 'build_deep_gcn']
 __all__ = ['DeeperGCN', 'GENConv', 'build_deep_gcn']

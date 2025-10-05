@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 import fcntl  # For file locking
 import time
-from ..config import DataConfig, ModelConfig, TrainingConfig
+from ..config import DataConfig, ModelConfig, TrainingConfig, ChemPropModelConfig,PyGModelConfig
 from .trainer import ChempropRTModule
 from ..data.datamodule import RTDataModule
 from ..model.model import build_model
@@ -243,29 +243,16 @@ def build_objective(data_cfg: DataConfig,
                     tuning_cfg: dict,
                     output_dir: Path,
                     study: optuna.Study):
-    """
-    Build the objective function for Optuna optimization.
-    
-    Args:
-        data_cfg: Data configuration (constant across trials)
-        base_model_cfg: Base model configuration (contains CheMeleon settings if applicable)
-        tuning_cfg: Dictionary with tuning parameters
-        output_dir: Directory to save results
-        study: Optuna study object (needed to access frozen trial info)
-    
-    Returns:
-        objective: Function that takes a trial and returns metric to optimize
-    """
+    """Build the objective function for Optuna optimization."""
     
     # Check if using CheMeleon
-    is_chemeleon = base_model_cfg.use_chemeleon
+    is_chemeleon = base_model_cfg.model_type == "chemprop" and base_model_cfg.chemprop.use_chemeleon
     
     def objective(trial: optuna.Trial):
         try:
             # Sample hyperparameters from search space
             
             # Model hyperparameters (architecture)
-            # For CheMeleon, we only tune FFN parameters, not message passing
             if is_chemeleon:
                 # CheMeleon: Only tune prediction head
                 ffn_hidden_dim = trial.suggest_categorical(
@@ -282,17 +269,14 @@ def build_objective(data_cfg: DataConfig,
                     tuning_cfg.get("dropout_min", 0.0),
                     tuning_cfg.get("dropout_max", 0.3)
                 )
-                activation = trial.suggest_categorical(
-                    "activation",
-                    tuning_cfg.get("activation_choices", ["relu"])
-                )
                 
                 # Fixed from base config (CheMeleon architecture)
                 message_hidden_dim = base_model_cfg.message_hidden_dim
                 num_layers = base_model_cfg.num_layers
-                aggregation = base_model_cfg.aggregation
-            else:
-                # Standard model: tune full architecture
+                aggregation = base_model_cfg.chemprop.aggregation
+                activation = None  # Not used in Chemprop
+            elif base_model_cfg.model_type == "chemprop":
+                # Standard Chemprop: tune full architecture
                 message_hidden_dim = trial.suggest_categorical(
                     "message_hidden_dim",
                     tuning_cfg.get("message_hidden_dim_choices", [300])
@@ -316,14 +300,40 @@ def build_objective(data_cfg: DataConfig,
                     tuning_cfg.get("dropout_min", 0.0),
                     tuning_cfg.get("dropout_max", 0.5)
                 )
-                activation = trial.suggest_categorical(
-                    "activation",
-                    tuning_cfg.get("activation_choices", ["relu"])
-                )
                 aggregation = trial.suggest_categorical(
                     "aggregation",
                     tuning_cfg.get("aggregation_choices", ["mean"])
                 )
+                activation = None  # Not used in Chemprop
+            else:  # PyG model
+                message_hidden_dim = trial.suggest_categorical(
+                    "message_hidden_dim",
+                    tuning_cfg.get("message_hidden_dim_choices", [64, 128, 256])
+                )
+                num_layers = trial.suggest_int(
+                    "num_layers",
+                    tuning_cfg.get("num_layers_min", 2),
+                    tuning_cfg.get("num_layers_max", 5)
+                )
+                ffn_hidden_dim = trial.suggest_categorical(
+                    "ffn_hidden_dim",
+                    tuning_cfg.get("ffn_hidden_dim_choices", [64, 128, 256])
+                )
+                ffn_num_layers = trial.suggest_int(
+                    "ffn_num_layers",
+                    tuning_cfg.get("ffn_num_layers_min", 1),
+                    tuning_cfg.get("ffn_num_layers_max", 3)
+                )
+                dropout = trial.suggest_float(
+                    "dropout",
+                    tuning_cfg.get("dropout_min", 0.0),
+                    tuning_cfg.get("dropout_max", 0.5)
+                )
+                activation = trial.suggest_categorical(
+                    "activation",
+                    tuning_cfg.get("activation_choices", ["relu", "silu", "gelu"])
+                )
+                aggregation = None  # Not used in PyG
             
             # Training hyperparameters
             learning_rate = trial.suggest_float(
@@ -341,7 +351,6 @@ def build_objective(data_cfg: DataConfig,
                 tuning_cfg.get("optimizer_choices", ["adam"])
             )
             
-            # Weight decay
             weight_decay_min = tuning_cfg.get("weight_decay_min", 0.0)
             weight_decay_max = tuning_cfg.get("weight_decay_max", 0.01)
             
@@ -384,46 +393,53 @@ def build_objective(data_cfg: DataConfig,
                     )
             
             # Create model configuration with sampled hyperparameters
-            # For Chemprop: don't include activation parameter (not used)
-            # For PyG: validate and include activation parameter
             if base_model_cfg.model_type == "chemprop":
-                # Chemprop doesn't use activation parameter
-                model_cfg = ModelConfig(
-                    model_type=base_model_cfg.model_type,
-                    use_chemeleon=base_model_cfg.use_chemeleon,
-                    chemeleon_checkpoint=base_model_cfg.chemeleon_checkpoint,
-                    freeze_chemeleon=base_model_cfg.freeze_chemeleon,
-                    message_hidden_dim=message_hidden_dim,
-                    num_layers=num_layers,
-                    ffn_hidden_dim=ffn_hidden_dim,
-                    ffn_num_layers=ffn_num_layers,
-                    dropout=dropout,
-                    aggregation=aggregation,
-                    use_additional_features=False,
-                    additional_feature_dim=0
+                # Copy chemprop config and update sampled params
+                chemprop_cfg = ChemPropModelConfig(
+                    aggregation=aggregation if aggregation else base_model_cfg.chemprop.aggregation,
+                    use_chemeleon=base_model_cfg.chemprop.use_chemeleon,
+                    chemeleon_checkpoint=base_model_cfg.chemprop.chemeleon_checkpoint,
+                    freeze_chemeleon=base_model_cfg.chemprop.freeze_chemeleon,
+                    chemeleon_num_layers=base_model_cfg.chemprop.chemeleon_num_layers
                 )
-            else:
-                # PyG models: validate activation
-                if activation not in ['relu', 'silu', 'gelu']:
-                    raise ValueError(f"Unsupported activation for PyG: '{activation}'. Must be one of: 'relu', 'silu', 'gelu'")
                 
                 model_cfg = ModelConfig(
-                    model_type=base_model_cfg.model_type,
-                    use_chemeleon=base_model_cfg.use_chemeleon,
-                    chemeleon_checkpoint=base_model_cfg.chemeleon_checkpoint,
-                    freeze_chemeleon=base_model_cfg.freeze_chemeleon,
+                    model_type="chemprop",
                     message_hidden_dim=message_hidden_dim,
                     num_layers=num_layers,
                     ffn_hidden_dim=ffn_hidden_dim,
                     ffn_num_layers=ffn_num_layers,
                     dropout=dropout,
+                    chemprop=chemprop_cfg
+                )
+            else:  # PyG
+                # Copy PyG config and update sampled params
+                pyg_cfg = PyGModelConfig(
+                    node_in_dim=base_model_cfg.pyg.node_in_dim,
+                    edge_in_dim=base_model_cfg.pyg.edge_in_dim,
+                    edge_dim=base_model_cfg.pyg.edge_dim,
+                    pool_type=base_model_cfg.pyg.pool_type,
+                    pool_ratio=base_model_cfg.pyg.pool_ratio,
+                    pool_num_heads=base_model_cfg.pyg.pool_num_heads,
+                    pool_dim_feedforward=base_model_cfg.pyg.pool_dim_feedforward,
+                    deepgcn=base_model_cfg.pyg.deepgcn,
+                    gnn_type=base_model_cfg.pyg.gnn_type,
                     activation=activation,
-                    aggregation=aggregation,
-                    use_additional_features=False,
-                    additional_feature_dim=0
+                    num_heads=base_model_cfg.pyg.num_heads,
+                    use_edge_features=base_model_cfg.pyg.use_edge_features
+                )
+                
+                model_cfg = ModelConfig(
+                    model_type="pyg",
+                    message_hidden_dim=message_hidden_dim,
+                    num_layers=num_layers,
+                    ffn_hidden_dim=ffn_hidden_dim,
+                    ffn_num_layers=ffn_num_layers,
+                    dropout=dropout,
+                    pyg=pyg_cfg
                 )
             
-            # Create training configuration with sampled hyperparameters
+            # Create training configuration
             training_cfg = TrainingConfig(
                 learning_rate=learning_rate,
                 batch_size=batch_size,
