@@ -23,3 +23,13 @@ remove_duplicates: true
 filter_invalid_inchi: true
 min_rt: 400
 max_rt: null
+
+# Molecule featurization - applies to BOTH Chemprop and PyG models
+# Options: "simple", "v1", "v2", "organic", "rigr"
+featurizer_type: "rigr"
+
+# SimpleMoleculeFeaturizer options (only used when featurizer_type="simple")
+atom_features: true
+bond_features: true
+atom_descriptors: null  # Options: null, "all", "rdkit_2d", "rdkit_2d_normalized"
+bond_descriptors: null  # Options: null, "all"

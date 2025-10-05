@@ -7,6 +7,8 @@ import hashlib
 import json
 from chemprop.data import MoleculeDatapoint, MoleculeDataset
 from chemprop.data.dataloader import build_dataloader
+from chemprop.featurizers import SimpleMoleculeMolGraphFeaturizer
+from chemprop.featurizers.atom import MultiHotAtomFeaturizer, RIGRAtomFeaturizer
 from ..config import DataConfig
 from rdkit import Chem
 from dataclasses import asdict
@@ -125,7 +127,7 @@ class RTDataModule(L.LightningDataModule):
     Lightning DataModule for RT prediction.
     
     Handles data loading, preprocessing, splitting, and batching.
-    Supports both Chemprop and custom GNN models.
+    Supports both Chemprop and custom GNN models with configurable featurizers.
     
     Processed data is saved in data/processed/<hash> where hash is computed
     from the DataConfig to ensure reproducibility and reuse.
@@ -143,7 +145,7 @@ class RTDataModule(L.LightningDataModule):
         """
         Args:
             config: Data configuration
-            model_type: "chemprop" or "custom_gnn"
+            model_type: "chemprop" or "pyg"
             batch_size: Batch size for dataloaders
             num_workers: Number of workers for data loading
             custom_splitter: Optional custom splitting function
@@ -156,6 +158,9 @@ class RTDataModule(L.LightningDataModule):
         self.num_workers = num_workers
         self.custom_splitter = custom_splitter
         self.force_rebuild = force_rebuild
+        
+        # Initialize featurizer
+        self.featurizer = self._create_featurizer()
         
         # Will be populated during setup
         self.train_dataset = None
@@ -170,6 +175,28 @@ class RTDataModule(L.LightningDataModule):
         self._compute_output_dir()
         
         print(f"[RTDataModule] Initialized with output_dir: {self.output_dir}")
+        print(f"[RTDataModule] Using featurizer: {self.config.featurizer_type}")
+    
+    def _create_featurizer(self):
+        """Create the appropriate featurizer based on config."""
+        if self.config.featurizer_type == "simple":
+            return SimpleMoleculeMolGraphFeaturizer(
+                atom_features=self.config.atom_features,
+                bond_features=self.config.bond_features,
+                atom_descriptors=self.config.atom_descriptors,
+                bond_descriptors=self.config.bond_descriptors
+            )
+        elif self.config.featurizer_type == "v1":
+            return SimpleMoleculeMolGraphFeaturizer(atom_featurizer=MultiHotAtomFeaturizer.v1())
+        elif self.config.featurizer_type == "v2":
+            return SimpleMoleculeMolGraphFeaturizer(atom_featurizer=MultiHotAtomFeaturizer.v2())
+        elif self.config.featurizer_type == "organic":
+            return SimpleMoleculeMolGraphFeaturizer(atom_featurizer=MultiHotAtomFeaturizer.organic())
+        elif self.config.featurizer_type == "rigr":
+            return SimpleMoleculeMolGraphFeaturizer(atom_featurizer=RIGRAtomFeaturizer())
+        else:
+            raise ValueError(f"Unknown featurizer_type: {self.config.featurizer_type}. "
+                           f"Must be one of: 'simple', 'v1', 'v2', 'organic', 'rigr'")
     
     def _compute_output_dir(self):
         """
@@ -357,7 +384,7 @@ class RTDataModule(L.LightningDataModule):
               f"val={len(self.val_dataset)}, test={len(self.test_dataset)}")
     
     def _polars_to_chemprop(self, df: pl.DataFrame, rt_mean: float, rt_std: float) -> MoleculeDataset:
-        """Convert Polars DataFrame to Chemprop MoleculeDataset."""
+        """Convert Polars DataFrame to Chemprop MoleculeDataset using configured featurizer."""
         datapoints = []
         skipped = 0
         
@@ -368,22 +395,32 @@ class RTDataModule(L.LightningDataModule):
             # Normalize RT
             rt_norm = (rt - rt_mean) / rt_std
             
-            # Convert InChI to RDKit mol
-            mol = Chem.MolFromInchi(inchi)
+            # Convert InChI to RDKit mol with proper sanitization
+            mol = Chem.MolFromInchi(inchi, sanitize=False)
             if mol is None:
                 skipped += 1
                 continue
-            # Fix: Pass rt_norm as a list (y should be a sequence of targets)
-            datapoint = MoleculeDatapoint(mol, [rt_norm])  # Changed from rt_norm to [rt_norm]
+            
+            # Sanitize with charge assignment
+            try:
+                Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL^Chem.SanitizeFlags.SANITIZE_PROPERTIES)
+                Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
+            except Exception as e:
+                print(f"[Warning] Failed to sanitize molecule: {e}")
+                skipped += 1
+                continue
+            
+            # Create datapoint - featurizer will be applied by Chemprop during batching
+            datapoint = MoleculeDatapoint(mol, [rt_norm])
             datapoints.append(datapoint)
         
         if skipped > 0:
             print(f"[Warning] Skipped {skipped} invalid InChI structures")
         
-        return MoleculeDataset(datapoints)
+        return MoleculeDataset(datapoints, featurizer=self.featurizer)
     
     def _polars_to_pyg(self, df, rt_mean: float, rt_std: float):
-        """Convert Polars DataFrame to PyG dataset."""
+        """Convert Polars DataFrame to PyG dataset using Chemprop featurizer."""
         graphs = []
         skipped = 0
         
@@ -394,17 +431,42 @@ class RTDataModule(L.LightningDataModule):
             # Normalize RT
             rt_norm = (rt - rt_mean) / rt_std
             
-            # Convert InChI to RDKit mol
-            mol = Chem.MolFromInchi(inchi)
+            # Convert InChI to RDKit mol with proper sanitization
+            mol = Chem.MolFromInchi(inchi, sanitize=False)
             if mol is None:
                 skipped += 1
                 continue
             
-            smiles = Chem.MolToSmiles(mol)
+            # Sanitize with charge assignment
+            try:
+                Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL^Chem.SanitizeFlags.SANITIZE_PROPERTIES)
+                Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
+            except Exception as e:
+                print(f"[Warning] Failed to sanitize molecule: {e}")
+                skipped += 1
+                continue
             
-            # Create PyG graph
-            graph = pyg.utils.from_smiles(smiles)
-            graph.y = torch.tensor([rt_norm], dtype=torch.float)
+            # Get features from Chemprop featurizer
+            molgraph = self.featurizer(mol)
+            
+            # Extract graph structure using correct MolGraph attributes
+            # MolGraph has: V (node features), E (edge features), edge_index
+            x = torch.tensor(molgraph.V, dtype=torch.float)
+            edge_index = torch.from_numpy(molgraph.edge_index)
+            
+            # Handle edge attributes if present
+            if molgraph.E is not None:
+                edge_attr = torch.tensor(molgraph.E, dtype=torch.float)
+            else:
+                edge_attr = None
+            
+            # Create Data object
+            graph = Data(
+                x=x,
+                edge_index=edge_index,
+                edge_attr=edge_attr,
+                y=torch.tensor([rt_norm], dtype=torch.float)
+            )
             graphs.append(graph)
         
         if skipped > 0:

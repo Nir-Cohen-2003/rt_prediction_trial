@@ -1,7 +1,12 @@
 from dataclasses import dataclass, field, asdict
 from typing import Literal, Optional
 from pathlib import Path
-
+from chemprop.featurizers.atom import (
+                MultiHotAtomFeaturizer,
+                RIGRAtomFeaturizer
+            )
+from chemprop.featurizers import SimpleMoleculeMolGraphFeaturizer
+            
 
 @dataclass
 class DataConfig:
@@ -31,6 +36,15 @@ class DataConfig:
     min_rt: Optional[float] = None
     max_rt: Optional[float] = None
     
+    # Molecule featurization - applies to BOTH Chemprop and PyG models
+    featurizer_type: Literal["simple", "v1", "v2", "organic", "rigr"] = "rigr"
+    
+    # SimpleMoleculeFeaturizer options (when featurizer_type="simple")
+    atom_features: bool = True
+    bond_features: bool = True
+    atom_descriptors: Optional[Literal["all", "rdkit_2d", "rdkit_2d_normalized"]] = None
+    bond_descriptors: Optional[Literal["all"]] = None
+    
     def __post_init__(self):
         """Convert string paths to Path objects."""
         self.raw_data_path = Path(self.raw_data_path)
@@ -53,9 +67,9 @@ class DeepGCNConfig:
 class PyGModelConfig:
     """Configuration specific to PyTorch Geometric models."""
     
-    # Node and edge feature dimensions
-    node_in_dim: int = 133  # RDKit default atom features
-    edge_in_dim: int = 14   # RDKit default bond features
+    # Node and edge feature dimensions (will be set from featurizer in __post_init__)
+    node_in_dim: int = 133  # Default, will be overridden
+    edge_in_dim: int = 14   # Default, will be overridden
     edge_dim: Optional[int] = None  # For TransformerConv, defaults to edge_in_dim if None
     
     # Pooling configuration
@@ -69,7 +83,7 @@ class PyGModelConfig:
     
     # Generic GNN settings
     gnn_type: Literal["gcn", "gin", "transformer", "deepgcn"] = "gcn"
-    activation: Literal["relu", "silu", "gelu"] = "relu"  # MOVED FROM ModelConfig
+    activation: Literal["relu", "silu", "gelu"] = "relu"
     num_heads: int = 4  # For transformer
     use_edge_features: bool = True
     
@@ -83,15 +97,6 @@ class ChemPropModelConfig:
     """Configuration specific to Chemprop models."""
     
     aggregation: Literal["mean", "sum", "norm", "attentive"] = "mean"
-    use_chemeleon: bool = False
-    chemeleon_checkpoint: Optional[str] = None
-    freeze_chemeleon: bool = False
-    chemeleon_num_layers: Optional[int] = None
-    
-    def __post_init__(self):
-        """Validate CheMeleon settings."""
-        if self.use_chemeleon and not self.chemeleon_checkpoint:
-            raise ValueError("chemeleon_checkpoint must be provided if use_chemeleon is True.")
 
 
 @dataclass
@@ -180,6 +185,38 @@ class Config:
     experiment_name: str = "rt_prediction"
     description: str = ""
     tags: list[str] = field(default_factory=list)
+    
+    def __post_init__(self):
+        """Set PyG feature dimensions from featurizer configuration."""
+        if self.model.model_type == "pyg":
+            # Import here to avoid circular dependency
+            
+            # Create appropriate featurizer to get dimensions
+            if self.data.featurizer_type == "simple":
+                featurizer = SimpleMoleculeMolGraphFeaturizer(
+                    atom_features=self.data.atom_features,
+                    bond_features=self.data.bond_features,
+                    atom_descriptors=self.data.atom_descriptors,
+                    bond_descriptors=self.data.bond_descriptors
+                )
+            elif self.data.featurizer_type == "v1":
+                featurizer = MultiHotAtomFeaturizer.v1()
+            elif self.data.featurizer_type == "v2":
+                featurizer = MultiHotAtomFeaturizer.v2()
+            elif self.data.featurizer_type == "organic":
+                featurizer = MultiHotAtomFeaturizer.organic()
+            elif self.data.featurizer_type == "rigr":
+                featurizer = RIGRAtomFeaturizer()
+            else:
+                raise ValueError(f"Unknown featurizer_type: {self.data.featurizer_type}")
+            
+            # Set dimensions in PyG config
+            self.model.pyg.node_in_dim = len(featurizer)
+            if hasattr(featurizer, 'bond_fdim'):
+                self.model.pyg.edge_in_dim = featurizer.bond_fdim
+            
+            print(f"[Config] Set PyG feature dimensions: node_in_dim={self.model.pyg.node_in_dim}, "
+                  f"edge_in_dim={self.model.pyg.edge_in_dim}")
     
     def to_dict(self) -> dict:
         """Convert config to dictionary for serialization."""
