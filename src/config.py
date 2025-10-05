@@ -36,7 +36,16 @@ class DataConfig:
         self.raw_data_path = Path(self.raw_data_path)
         self.output_dir = Path(self.output_dir)
 
-
+@dataclass
+class deepgcnConfig:
+    """Configuration specific to DeepGCN models."""
+    
+    norm_type: Literal["batch", "layer", "instance"] = "layer"
+    beta: float = 1.0  # Initial inverse temperature for GENConv
+    learn_beta: bool = True  # Whether beta is learnable
+    gen_aggr: Literal["softmax", "power"] = "softmax"  # GENConv aggregation type
+    mlp_layers: int = 1  # Number of MLP layers in GENConv
+    num_timesteps: int = 2  # For AttentiveFP readout
 @dataclass
 class PyGModelConfig:
     """Configuration specific to PyTorch Geometric models."""
@@ -49,21 +58,15 @@ class PyGModelConfig:
     pool_type: Literal["mean", "sum", "max", "transformer", "sag", "topk"] = "mean"
     pool_ratio: float = 0.5  # For SAG and TopK pooling
     pool_num_heads: int = 4  # For Transformer pooling
-    pool_dim_feedforward: int = 128  # For Transformer pooling
+    pool_dim_feedforward: int = 16  # For Transformer pooling
     
     # DeeperGCN specific settings
-    norm_type: Literal["batch", "layer", "instance"] = "layer"
-    beta: float = 1.0  # Initial inverse temperature for GENConv
-    learn_beta: bool = True  # Whether beta is learnable
-    gen_aggr: Literal["softmax", "power"] = "softmax"  # GENConv aggregation type
-    mlp_layers: int = 1  # Number of MLP layers in GENConv
-    num_timesteps: int = 2  # For AttentiveFP readout
+    deepgcn: deepgcnConfig = field(default_factory=deepgcnConfig)
     
     # Generic GNN settings (for GCN, GAT, GIN, etc.)
-    gnn_type: Literal["gcn", "gat", "gin", "mpnn", "deepgcn"] = "gcn"
-    num_heads: int = 4  # For GAT
+    gnn_type: Literal["gcn", "gin","transformer", "deepgcn"] = "gcn"
+    num_heads: int = 4  # For  transformer
     edge_dim: Optional[int] = None  # Edge feature dimension for models that support it
-
 
 @dataclass
 class ModelConfig:
