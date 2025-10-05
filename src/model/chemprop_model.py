@@ -65,24 +65,22 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
             num_layers = len(layer_keys) if layer_keys else cfg.num_layers
             print(f"[build_chemprop_mpnn] Inferred num_layers={num_layers} from checkpoint")
         
-        # Build message passing with inferred/config dimensions
+        # Build message passing with inferred/config dimensions (no activation parameter)
         message_passing = BondMessagePassing(
             d_h=message_hidden_dim,
             depth=num_layers,
             dropout=cfg.dropout,
-            activation=cfg.activation,
         )
         
         # Select aggregation function (CheMeleon typically uses mean)
         agg = MeanAggregation()
         
-        # Create a temporary FFN (will be replaced)
+        # Create a temporary FFN (will be replaced, no activation parameter)
         temp_ffn = RegressionFFN(
             input_dim=message_hidden_dim,
             hidden_dim=message_hidden_dim,
             n_layers=2,
             dropout=0.0,
-            activation="relu",
             n_tasks=1
         )
         
@@ -117,14 +115,13 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
             for param in model.agg.parameters():
                 param.requires_grad = False
         
-        # Replace the prediction head with a new one for RT prediction
+        # Replace the prediction head with a new one for RT prediction (no activation parameter)
         print("[build_chemprop_mpnn] Creating new prediction head for RT regression")
         model.predictor = RegressionFFN(
             input_dim=message_hidden_dim,
             hidden_dim=cfg.ffn_hidden_dim,
             n_layers=cfg.ffn_num_layers,
             dropout=cfg.dropout,
-            activation=cfg.activation,
             n_tasks=1
         )
         
@@ -134,12 +131,11 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
     # Standard model building (training from scratch)
     print("[build_chemprop_mpnn] Building Chemprop model from scratch")
     
-    # Message passing layer
+    # Message passing layer (no activation parameter)
     message_passing = BondMessagePassing(
         d_h=cfg.message_hidden_dim,
         depth=cfg.num_layers,
         dropout=cfg.dropout,
-        activation=cfg.activation,
     )
     
     # Select aggregation function
@@ -158,13 +154,12 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
     else:
         raise ValueError(f"Unknown aggregation type: {cfg.aggregation}")
     
-    # Feed-forward prediction network
+    # Feed-forward prediction network (no activation parameter)
     ffn = RegressionFFN(
         input_dim=cfg.message_hidden_dim,
         hidden_dim=cfg.ffn_hidden_dim,
         n_layers=cfg.ffn_num_layers,
         dropout=cfg.dropout,
-        activation=cfg.activation,
         n_tasks=1  # Single RT value prediction
     )
     

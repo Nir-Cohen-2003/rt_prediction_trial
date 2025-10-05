@@ -12,9 +12,7 @@ import torch_geometric.nn as gnn
 from torch_geometric.nn import MessagePassing, global_mean_pool, global_add_pool, global_max_pool
 from torch_geometric.utils import softmax
 from ..config import ModelConfig
-from .pyg_components import TransformerPool, SAGPool, TopKPool
-
-
+from .pyg_components import TransformerPool, SAGPool, TopKPool, get_activation
 class GENConv(MessagePassing):
     """
     Generalized Message Aggregator with SoftMax and PowerMean aggregation.
@@ -27,10 +25,11 @@ class GENConv(MessagePassing):
         learn_beta: Whether beta is learnable
         mlp_layers: Number of MLP layers for message transformation
         norm: Type of normalization ('batch', 'layer', 'instance')
+        activation: Activation function ('relu', 'silu', 'gelu')
     """
     
     def __init__(self, in_dim, out_dim, aggregator='softmax', beta=1.0, 
-                 learn_beta=True, mlp_layers=1, norm='layer'):
+                 learn_beta=True, mlp_layers=1, norm='layer', activation='relu'):
         super(GENConv, self).__init__(aggr=None)
         
         self.in_dim = in_dim
@@ -41,6 +40,9 @@ class GENConv(MessagePassing):
             self.beta = nn.Parameter(torch.tensor(beta))
         else:
             self.register_buffer('beta', torch.tensor(beta))
+        
+        # Get activation function
+        act_fn = get_activation(activation)
         
         # MLP for message transformation
         mlp = []
@@ -57,7 +59,7 @@ class GENConv(MessagePassing):
             elif norm == 'instance':
                 mlp.append(nn.InstanceNorm1d(out_dim))
             
-            mlp.append(nn.ReLU())
+            mlp.append(get_activation(activation))
         
         self.msg_norm = nn.Sequential(*mlp)
         self.edge_encoder = nn.Linear(in_dim, out_dim)
@@ -116,6 +118,7 @@ class DeeperGCN(nn.Module):
         hid_dim: Hidden dimension
         num_layers: Number of GCN layers
         dropout: Dropout rate
+        activation: Activation function ('relu', 'silu', 'gelu')
         norm: Type of normalization ('batch', 'layer', 'instance')
         beta: Initial inverse temperature
         learn_beta: Whether beta is learnable
@@ -135,6 +138,7 @@ class DeeperGCN(nn.Module):
                  hid_dim,
                  num_layers,
                  dropout=0.0,
+                 activation='relu',
                  norm='layer',
                  beta=1.0,
                  learn_beta=True,
@@ -152,6 +156,9 @@ class DeeperGCN(nn.Module):
         self.dropout = dropout
         self.pool_type = pool_type
         
+        # Get activation function
+        self.activation_fn = get_activation(activation)
+        
         # Initial encoders
         self.node_encoder = nn.Linear(node_in_dim, hid_dim)
         self.edge_encoder = nn.Linear(edge_in_dim, hid_dim)
@@ -168,7 +175,8 @@ class DeeperGCN(nn.Module):
                 beta=beta,
                 learn_beta=learn_beta,
                 mlp_layers=mlp_layers,
-                norm=norm
+                norm=norm,
+                activation=activation
             )
             self.gcns.append(conv)
             
@@ -202,14 +210,14 @@ class DeeperGCN(nn.Module):
         else:
             raise ValueError(f"Unknown pool_type: {pool_type}")
         
-        # Output MLP - now uses config values
+        # Output MLP
         mlp_list = []
         for i in range(ffn_num_layers):
             if i == 0:
                 mlp_list.append(nn.Linear(hid_dim, ffn_hidden_dim))
             else:
                 mlp_list.append(nn.Linear(ffn_hidden_dim, ffn_hidden_dim))
-            mlp_list.append(nn.ReLU())
+            mlp_list.append(get_activation(activation))
             mlp_list.append(nn.Dropout(dropout))
         mlp_list.append(nn.Linear(ffn_hidden_dim, 1))
         
@@ -233,7 +241,7 @@ class DeeperGCN(nn.Module):
         for layer in range(self.num_layers):
             # Pre-activation
             h = self.norms[layer](x)
-            h = F.relu(h)
+            h = self.activation_fn(h)
             h = F.dropout(h, p=self.dropout, training=self.training)
             
             # GCN layer with residual connection
@@ -263,12 +271,18 @@ def build_deep_gcn(model_config: ModelConfig) -> nn.Module:
     """
     pyg_cfg = model_config.pyg
     
+    # Validate activation
+    activation = model_config.activation.lower()
+    if activation not in ['relu', 'silu', 'gelu']:
+        raise ValueError(f"Unsupported activation: '{activation}'. Must be one of: 'relu', 'silu', 'gelu'")
+    
     model = DeeperGCN(
         node_in_dim=pyg_cfg.node_in_dim,
         edge_in_dim=pyg_cfg.edge_in_dim,
         hid_dim=model_config.message_hidden_dim,
         num_layers=model_config.num_layers,
         dropout=model_config.dropout,
+        activation=activation,
         norm=pyg_cfg.deepgcn.norm_type,
         beta=pyg_cfg.deepgcn.beta,
         learn_beta=pyg_cfg.deepgcn.learn_beta,

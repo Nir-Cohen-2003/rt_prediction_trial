@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch_geometric.nn as gnn
 from torch_geometric.nn import global_mean_pool, global_add_pool, global_max_pool
 from ..config import ModelConfig
-from .pyg_components import TransformerPool, SAGPool, TopKPool
+from .pyg_components import TransformerPool, SAGPool, TopKPool, get_activation
 
 
 class GenericPyGModel(nn.Module):
@@ -24,6 +24,7 @@ class GenericPyGModel(nn.Module):
         num_layers: Number of GNN layers
         gnn_type: Type of GNN layer ('gcn', 'gin', 'transformer')
         dropout: Dropout rate
+        activation: Activation function ('relu', 'silu', 'gelu')
         pool_type: Type of pooling ('mean', 'sum', 'max', 'transformer', 'sag', 'topk')
         pool_ratio: Ratio for hierarchical pooling (SAG, TopK)
         pool_num_heads: Number of heads for transformer pooling
@@ -41,6 +42,7 @@ class GenericPyGModel(nn.Module):
                  num_layers,
                  gnn_type='gcn',
                  dropout=0.0,
+                 activation='relu',
                  pool_type='mean',
                  pool_ratio=0.5,
                  pool_num_heads=4,
@@ -55,6 +57,9 @@ class GenericPyGModel(nn.Module):
         self.dropout = dropout
         self.gnn_type = gnn_type.lower()
         self.pool_type = pool_type
+        
+        # Get activation function
+        self.activation_fn = get_activation(activation)
         
         # Initial encoders
         self.node_encoder = nn.Linear(node_in_dim, hid_dim)
@@ -73,7 +78,7 @@ class GenericPyGModel(nn.Module):
                 mlp = nn.Sequential(
                     nn.Linear(hid_dim, hid_dim),
                     nn.BatchNorm1d(hid_dim),
-                    nn.ReLU(),
+                    get_activation(activation),
                     nn.Linear(hid_dim, hid_dim)
                 )
                 conv = gnn.GINConv(mlp, train_eps=True)
@@ -123,7 +128,7 @@ class GenericPyGModel(nn.Module):
                 mlp_layers.append(nn.Linear(hid_dim, ffn_hidden_dim))
             else:
                 mlp_layers.append(nn.Linear(ffn_hidden_dim, ffn_hidden_dim))
-            mlp_layers.append(nn.ReLU())
+            mlp_layers.append(get_activation(activation))
             mlp_layers.append(nn.Dropout(dropout))
         mlp_layers.append(nn.Linear(ffn_hidden_dim, 1))
         
@@ -159,7 +164,7 @@ class GenericPyGModel(nn.Module):
             x = self.batch_norms[i](x)
             
             # Activation
-            x = F.relu(x)
+            x = self.activation_fn(x)
             
             # Dropout
             x = F.dropout(x, p=self.dropout, training=self.training)
@@ -192,6 +197,11 @@ def build_pyg_model(model_config: ModelConfig) -> nn.Module:
     """
     pyg_cfg = model_config.pyg
     
+    # Validate activation
+    activation = model_config.activation.lower()
+    if activation not in ['relu', 'silu', 'gelu']:
+        raise ValueError(f"Unsupported activation: '{activation}'. Must be one of: 'relu', 'silu', 'gelu'")
+    
     # Determine edge dimension
     edge_dim = pyg_cfg.edge_dim if pyg_cfg.edge_dim else pyg_cfg.edge_in_dim
     
@@ -202,6 +212,7 @@ def build_pyg_model(model_config: ModelConfig) -> nn.Module:
         num_layers=model_config.num_layers,
         gnn_type=pyg_cfg.gnn_type,
         dropout=model_config.dropout,
+        activation=activation,
         pool_type=pyg_cfg.pool_type,
         pool_ratio=pyg_cfg.pool_ratio,
         pool_num_heads=pyg_cfg.pool_num_heads,

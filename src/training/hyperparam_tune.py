@@ -384,21 +384,44 @@ def build_objective(data_cfg: DataConfig,
                     )
             
             # Create model configuration with sampled hyperparameters
-            model_cfg = ModelConfig(
-                model_type=base_model_cfg.model_type,
-                use_chemeleon=base_model_cfg.use_chemeleon,
-                chemeleon_checkpoint=base_model_cfg.chemeleon_checkpoint,
-                freeze_chemeleon=base_model_cfg.freeze_chemeleon,
-                message_hidden_dim=message_hidden_dim,
-                num_layers=num_layers,
-                ffn_hidden_dim=ffn_hidden_dim,
-                ffn_num_layers=ffn_num_layers,
-                dropout=dropout,
-                activation=activation,
-                aggregation=aggregation,
-                use_additional_features=False,
-                additional_feature_dim=0
-            )
+            # For Chemprop: don't include activation parameter (not used)
+            # For PyG: validate and include activation parameter
+            if base_model_cfg.model_type == "chemprop":
+                # Chemprop doesn't use activation parameter
+                model_cfg = ModelConfig(
+                    model_type=base_model_cfg.model_type,
+                    use_chemeleon=base_model_cfg.use_chemeleon,
+                    chemeleon_checkpoint=base_model_cfg.chemeleon_checkpoint,
+                    freeze_chemeleon=base_model_cfg.freeze_chemeleon,
+                    message_hidden_dim=message_hidden_dim,
+                    num_layers=num_layers,
+                    ffn_hidden_dim=ffn_hidden_dim,
+                    ffn_num_layers=ffn_num_layers,
+                    dropout=dropout,
+                    aggregation=aggregation,
+                    use_additional_features=False,
+                    additional_feature_dim=0
+                )
+            else:
+                # PyG models: validate activation
+                if activation not in ['relu', 'silu', 'gelu']:
+                    raise ValueError(f"Unsupported activation for PyG: '{activation}'. Must be one of: 'relu', 'silu', 'gelu'")
+                
+                model_cfg = ModelConfig(
+                    model_type=base_model_cfg.model_type,
+                    use_chemeleon=base_model_cfg.use_chemeleon,
+                    chemeleon_checkpoint=base_model_cfg.chemeleon_checkpoint,
+                    freeze_chemeleon=base_model_cfg.freeze_chemeleon,
+                    message_hidden_dim=message_hidden_dim,
+                    num_layers=num_layers,
+                    ffn_hidden_dim=ffn_hidden_dim,
+                    ffn_num_layers=ffn_num_layers,
+                    dropout=dropout,
+                    activation=activation,
+                    aggregation=aggregation,
+                    use_additional_features=False,
+                    additional_feature_dim=0
+                )
             
             # Create training configuration with sampled hyperparameters
             training_cfg = TrainingConfig(

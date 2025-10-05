@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch_geometric.nn as gnn
-
+from typing import Literal
 
 class TransformerPool(nn.Module):
     def __init__(self, in_channels, num_heads=4, dim_feedforward=128, dropout_rate=0.1):
@@ -42,3 +42,13 @@ class TopKPool(nn.Module):
         # pass edge_attr into the pool in the correct argument position
         x, edge_index, edge_attr, batch, _, _ = self.pool(x, edge_index, edge_attr, batch)
         return gnn.global_mean_pool(x, batch)
+
+def get_activation(name: Literal["relu", "silu", "gelu"]) -> nn.Module:
+    if name == "relu":
+        return nn.ReLU()
+    elif name == "silu":
+        return nn.SiLU()
+    elif name == "gelu":
+        return nn.GELU()
+    else:
+        raise ValueError(f"Unknown activation function: {name}, supported: 'relu', 'silu', 'gelu'")

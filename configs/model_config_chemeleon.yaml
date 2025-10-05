@@ -10,13 +10,13 @@ freeze_chemeleon: false  # Set to true to only train the prediction head (faster
 # Feed-forward network settings (prediction head)
 # Note: message_hidden_dim, num_layers, and aggregation are ignored when using CheMeleon
 # as they come from the pretrained model
-ffn_hidden_dim: 300
+ffn_hidden_dim: 64
 ffn_num_layers: 2
 dropout: 0.1
 activation: "relu"
 
 # These settings are ignored when use_chemeleon=true
-message_hidden_dim: 300  # Overridden by CheMeleon architecture
+message_hidden_dim: 64  # Overridden by CheMeleon architecture
 num_layers: 3  # Overridden by CheMeleon architecture
 aggregation: "mean"  # Overridden by CheMeleon architecture
 
