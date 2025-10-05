@@ -8,10 +8,10 @@ model_type: "pyg"  # Options: "chemprop" or "pyg"
 # ffn_hidden_dim controls the width of the final output MLP
 # ffn_num_layers controls the number of layers in the final output MLP
 message_hidden_dim: 200
-num_layers: 8
+num_layers: 16
 ffn_hidden_dim: 1024
-ffn_num_layers: 2
-dropout: 0.0
+ffn_num_layers: 1
+dropout: 0.1
 
 # Chemprop-specific configuration
 chemprop:

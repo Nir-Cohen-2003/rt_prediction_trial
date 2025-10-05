@@ -19,10 +19,15 @@ class DataConfig:
     inchi_column: str = "inchi"
     
     # Splitting
-    split_method: Literal["random", "custom"] = "random"
+    split_method: Literal["random", "custom", "scaffold", "butina"] = "random"
     test_fraction: float = 0.1
     val_fraction: float = 0.1
     random_seed: int = 42
+    
+    # Butina clustering parameters
+    butina_cutoff: float = 0.35  # Tanimoto distance threshold
+    butina_radius: int = 2  # Morgan fingerprint radius
+    butina_nbits: int = 2048  # Morgan fingerprint size
     
     # Output paths
     output_dir: Path = Path("data/processed")
@@ -146,11 +151,16 @@ class TrainingConfig:
     optimizer: Literal["adam", "adamw", "sgd"] = "adam"
     weight_decay: float = 0.0
     
+    # Loss function
+    loss_fn: Literal["mse", "mae", "huber", "smooth_l1"] = "mse"
+    huber_delta: float = 1.0  # Delta parameter for Huber/Smooth L1 loss
+    
     # Learning rate scheduling
     use_scheduler: bool = False
-    scheduler_type: Literal["plateau", "cosine", "step"] = "plateau"
+    scheduler_type: Literal["plateau", "cosine", "step", "cosine_warmup"] = "plateau"
     scheduler_patience: int = 10
     scheduler_factor: float = 0.5
+    warmup_epochs: int = 5  # For cosine_warmup scheduler
     
     # Early stopping
     early_stop_patience: int = 20
@@ -175,9 +185,13 @@ class TrainingConfig:
     deterministic: bool = False
     
     def __post_init__(self):
-        """Convert string paths to Path objects."""
+        """Convert string paths to Path objects and validate settings."""
         self.checkpoint_dir = Path(self.checkpoint_dir)
         self.log_dir = Path(self.log_dir)
+        
+        # Validate huber_delta
+        if self.loss_fn in ["huber", "smooth_l1"] and self.huber_delta <= 0:
+            raise ValueError(f"huber_delta must be positive, got {self.huber_delta}")
 
 
 @dataclass

@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 from lightning.pytorch.loggers import CSVLogger
@@ -6,12 +7,60 @@ from pathlib import Path
 import json
 import argparse
 import yaml
+import math
 from ..config import Config, DataConfig, ModelConfig, TrainingConfig
 
 from ..data.datamodule import RTDataModule
 from ..model.model import build_model
 
 torch.set_float32_matmul_precision('medium')
+
+class GradientClippingCallback(L.Callback):
+    """Monitor and log gradient norms to detect instabilities."""
+    
+    def on_before_optimizer_step(self, trainer, pl_module, optimizer):
+        # Log gradient norm
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            pl_module.parameters(), 
+            max_norm=float('inf')  # Just compute, don't clip yet
+        )
+        pl_module.log('train/grad_norm', grad_norm, prog_bar=False)
+
+class CosineAnnealingWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
+    """
+    Cosine annealing scheduler with linear warmup.
+    
+    Learning rate schedule:
+    1. Linear warmup from 0 to base_lr over warmup_epochs
+    2. Cosine annealing from base_lr to eta_min over remaining epochs
+    
+    Args:
+        optimizer: Wrapped optimizer
+        warmup_epochs: Number of warmup epochs
+        max_epochs: Total number of epochs
+        eta_min: Minimum learning rate
+        last_epoch: The index of last epoch
+    """
+    
+    def __init__(self, optimizer, warmup_epochs, max_epochs, eta_min=1e-7, last_epoch=-1):
+        self.warmup_epochs = warmup_epochs
+        self.max_epochs = max_epochs
+        self.eta_min = eta_min
+        super().__init__(optimizer, last_epoch)
+    
+    def get_lr(self):
+        if self.last_epoch < self.warmup_epochs:
+            # Linear warmup
+            return [base_lr * (self.last_epoch + 1) / self.warmup_epochs 
+                    for base_lr in self.base_lrs]
+        else:
+            # Cosine annealing
+            progress = (self.last_epoch - self.warmup_epochs) / (self.max_epochs - self.warmup_epochs)
+            return [self.eta_min + (base_lr - self.eta_min) * 
+                    (1 + math.cos(math.pi * progress)) / 2
+                    for base_lr in self.base_lrs]
+
+
 class ChempropRTModule(L.LightningModule):
     """
     Lightning module wrapping models for RT prediction.
@@ -46,8 +95,25 @@ class ChempropRTModule(L.LightningModule):
         self.rt_mean = rt_mean
         self.rt_std = rt_std
         
-        # Loss function (MSE for regression)
-        self.loss_fn = torch.nn.MSELoss()
+        # Select loss function
+        if training_config.loss_fn == "mse":
+            self.loss_fn = nn.MSELoss()
+        elif training_config.loss_fn == "mae":
+            self.loss_fn = nn.L1Loss()
+        elif training_config.loss_fn == "huber":
+            self.loss_fn = nn.HuberLoss(delta=training_config.huber_delta)
+        elif training_config.loss_fn == "smooth_l1":
+            self.loss_fn = nn.SmoothL1Loss(beta=training_config.huber_delta)
+        else:
+            raise ValueError(f"Unknown loss function: {training_config.loss_fn}")
+        
+        print(f"[ChempropRTModule] Using loss function: {training_config.loss_fn}")
+        if training_config.loss_fn in ["huber", "smooth_l1"]:
+            print(f"[ChempropRTModule] Huber delta: {training_config.huber_delta}")
+        
+        # Track best validation loss for anomaly detection
+        self.best_val_loss = float('inf')
+        self.val_loss_spike_count = 0
         
         # Save hyperparameters (excluding the model itself to avoid duplication)
         self.save_hyperparameters(ignore=["model"])
@@ -96,6 +162,12 @@ class ChempropRTModule(L.LightningModule):
         
         # Compute loss (on normalized values)
         loss = self.loss_fn(preds, targets)
+        
+        # Check for NaN/Inf in loss during training
+        if stage == "train" and (torch.isnan(loss) or torch.isinf(loss)):
+            self.log('train/nan_loss', 1.0, batch_size=batch_size)
+            # Return a safe loss to prevent crash
+            return torch.tensor(0.0, requires_grad=True, device=loss.device)
         
         # Denormalize for interpretable metrics
         preds_denorm = preds * self.rt_std + self.rt_mean
@@ -148,6 +220,23 @@ class ChempropRTModule(L.LightningModule):
         """Test step."""
         return self._shared_step(batch, batch_idx, "test")
     
+    def on_validation_epoch_end(self):
+        """Detect sudden spikes in validation loss."""
+        val_loss = self.trainer.callback_metrics.get('val/loss')
+        if val_loss is not None:
+            # Detect spike (loss increased by >3x)
+            if val_loss > self.best_val_loss * 3.0:
+                self.val_loss_spike_count += 1
+                self.log('val/loss_spike', 1.0)
+                print(f"\n⚠️ WARNING: Validation loss spike detected! "
+                      f"Previous best: {self.best_val_loss:.2f}, Current: {val_loss:.2f}")
+            else:
+                self.val_loss_spike_count = 0
+            
+            # Update best
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+    
     def configure_optimizers(self):
         """
         Configure optimizer and optional learning rate scheduler.
@@ -162,13 +251,15 @@ class ChempropRTModule(L.LightningModule):
             optimizer = torch.optim.Adam(
                 self.parameters(),
                 lr=cfg.learning_rate,
-                weight_decay=cfg.weight_decay
+                weight_decay=cfg.weight_decay,
+                eps=1e-8  # More stable epsilon
             )
         elif cfg.optimizer == "adamw":
             optimizer = torch.optim.AdamW(
                 self.parameters(),
                 lr=cfg.learning_rate,
-                weight_decay=cfg.weight_decay
+                weight_decay=cfg.weight_decay,
+                eps=1e-8
             )
         elif cfg.optimizer == "sgd":
             optimizer = torch.optim.SGD(
@@ -190,7 +281,8 @@ class ChempropRTModule(L.LightningModule):
                 optimizer,
                 mode=cfg.monitor_mode,
                 patience=cfg.scheduler_patience,
-                factor=cfg.scheduler_factor
+                factor=cfg.scheduler_factor,
+                min_lr=1e-7  # Prevent LR from going too low
             )
             return {
                 "optimizer": optimizer,
@@ -202,7 +294,15 @@ class ChempropRTModule(L.LightningModule):
         elif cfg.scheduler_type == "cosine":
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
-                T_max=cfg.num_epochs
+                T_max=cfg.num_epochs,
+                eta_min=1e-7  # Minimum learning rate
+            )
+        elif cfg.scheduler_type == "cosine_warmup":
+            scheduler = CosineAnnealingWarmupScheduler(
+                optimizer,
+                warmup_epochs=cfg.warmup_epochs,
+                max_epochs=cfg.num_epochs,
+                eta_min=1e-7
             )
         elif cfg.scheduler_type == "step":
             scheduler = torch.optim.lr_scheduler.StepLR(
@@ -283,10 +383,14 @@ def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTD
         monitor=config.training.monitor_metric,
         patience=config.training.early_stop_patience,
         mode=config.training.monitor_mode,
-        verbose=True
+        verbose=True,
+        check_finite=True  # Stop if loss becomes NaN/Inf
     )
     
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
+    
+    # Add gradient monitoring
+    grad_monitor = GradientClippingCallback()
     
     # Setup logger
     logger = CSVLogger(
@@ -308,11 +412,15 @@ def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTD
         accelerator=config.training.accelerator,
         devices=config.training.devices,
         precision=config.training.precision,
-        callbacks=[checkpoint_callback, early_stop_callback, lr_monitor],
+        callbacks=[checkpoint_callback, early_stop_callback, lr_monitor, grad_monitor],
         logger=logger,
         log_every_n_steps=config.training.log_every_n_steps,
         deterministic=config.training.deterministic,
-        enable_progress_bar=True
+        enable_progress_bar=True,
+        gradient_clip_val=1.0,  # Clip gradients to prevent explosions
+        gradient_clip_algorithm="norm",
+        detect_anomaly=False,  # Set to True for debugging but slower
+        accumulate_grad_batches=1  # Can increase for more stable gradients
     )
     
     # Train the module

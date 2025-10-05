@@ -2,19 +2,22 @@
 
 # Optimization
 learning_rate: 0.001
-batch_size: 1024
-num_epochs: 200
+batch_size: 64
+num_epochs: 300
 optimizer: "adam"
 weight_decay: 0.0
 
+# Loss function
+loss_fn: "huber"
+huber_delta: 1.0
+
 # Learning rate scheduling
-use_scheduler: false
-scheduler_type: "plateau"
-scheduler_patience: 10
-scheduler_factor: 0.5
+use_scheduler: true
+scheduler_type: "cosine_warmup"
+warmup_epochs: 10
 
 # Early stopping
-early_stop_patience: 30
+early_stop_patience: 50
 monitor_metric: "val/mae"
 monitor_mode: "min"
 

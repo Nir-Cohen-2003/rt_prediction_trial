@@ -18,6 +18,7 @@ import torch_geometric as pyg
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
 from .lmdb_dataset import LMDBGraphDataset
+from .dataset_splitting import split_random, split_scaffold, split_butina, split_custom
 
 def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
     """
@@ -62,64 +63,6 @@ def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
     
     print(f"[preprocess_raw_data] Finished with {len(df)} rows")
     return df
-
-
-def split_random(
-    df: pl.DataFrame,
-    test_fraction: float,
-    val_fraction: float,
-    seed: int
-) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-    """
-    Random split of data into train/val/test.
-    
-    Args:
-        df: Input dataframe
-        test_fraction: Fraction for test set
-        val_fraction: Fraction for validation set
-        seed: Random seed for reproducibility
-    
-    Returns:
-        train_df, val_df, test_df
-    """
-    n = len(df)
-    
-    # Shuffle with seed
-    df = df.sample(fraction=1.0, seed=seed, shuffle=True)
-    
-    # Calculate split indices
-    test_size = int(n * test_fraction)
-    val_size = int(n * val_fraction)
-    train_size = n - test_size - val_size
-    
-    print(f"[split_random] train={train_size}, val={val_size}, test={test_size}")
-    
-    # Split
-    test_df = df.head(test_size)
-    val_df = df.slice(test_size, val_size)
-    train_df = df.tail(train_size)
-    
-    return train_df, val_df, test_df
-
-
-def split_custom(
-    df: pl.DataFrame,
-    splitter_fn: Callable,
-    **kwargs
-) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-    """
-    Custom split using a user-provided function.
-    
-    Args:
-        df: Input dataframe
-        splitter_fn: Function that takes df and returns (train_df, val_df, test_df)
-        **kwargs: Additional arguments for splitter_fn
-    
-    Returns:
-        train_df, val_df, test_df
-    """
-    print(f"[split_custom] Using custom splitter: {splitter_fn.__name__}")
-    return splitter_fn(df, **kwargs)
 
 
 class RTDataModule(L.LightningDataModule):
@@ -275,13 +218,32 @@ class RTDataModule(L.LightningDataModule):
         # Preprocess
         df = preprocess_raw_data(df, self.config)
         
-        # Split data
+        # Split data based on method
         if self.config.split_method == "random":
             train_df, val_df, test_df = split_random(
                 df,
                 self.config.test_fraction,
                 self.config.val_fraction,
                 self.config.random_seed
+            )
+        elif self.config.split_method == "scaffold":
+            train_df, val_df, test_df = split_scaffold(
+                df,
+                self.config.test_fraction,
+                self.config.val_fraction,
+                self.config.random_seed,
+                self.config.inchi_column
+            )
+        elif self.config.split_method == "butina":
+            train_df, val_df, test_df = split_butina(
+                df,
+                self.config.test_fraction,
+                self.config.val_fraction,
+                self.config.random_seed,
+                self.config.inchi_column,
+                self.config.butina_cutoff,
+                self.config.butina_radius,
+                self.config.butina_nbits
             )
         elif self.config.split_method == "custom":
             if self.custom_splitter is None:
