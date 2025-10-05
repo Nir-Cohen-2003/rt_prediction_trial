@@ -11,7 +11,11 @@ from ..config import DataConfig
 from rdkit import Chem
 from dataclasses import asdict
 import pickle
-
+import torch
+import torch_geometric as pyg
+from torch_geometric.data import Data, Batch
+from torch_geometric.loader import DataLoader
+from .lmdb_dataset import LMDBGraphDataset
 
 def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
     """
@@ -215,12 +219,17 @@ class RTDataModule(L.LightningDataModule):
         chemprop_train_path = self.output_dir / "train_chemprop.pkl"
         chemprop_val_path = self.output_dir / "val_chemprop.pkl"
         chemprop_test_path = self.output_dir / "test_chemprop.pkl"
+        lmdb_train_path = self.output_dir / "train_graphs.lmdb"
+        lmdb_val_path = self.output_dir / "val_graphs.lmdb"
+        lmdb_test_path = self.output_dir / "test_graphs.lmdb"
         
-        if (train_path.exists() and stats_path.exists() and 
-            chemprop_train_path.exists() and chemprop_val_path.exists() and 
-            chemprop_test_path.exists() and not self.force_rebuild):
-            print(f"[RTDataModule] Processed data already exists in {self.output_dir}, skipping.")
-            return
+        if (train_path.exists() and stats_path.exists() and not self.force_rebuild):
+            if self.model_type == "chemprop" and all(p.exists() for p in [chemprop_train_path, chemprop_val_path, chemprop_test_path]):
+                print(f"[RTDataModule] Processed data already exists in {self.output_dir}, skipping.")
+                return
+            elif self.model_type != "chemprop" and all(p.exists() for p in [lmdb_train_path, lmdb_val_path, lmdb_test_path]):
+                print(f"[RTDataModule] Processed data already exists in {self.output_dir}, skipping.")
+                return
         
         if self.force_rebuild:
             print("[RTDataModule] force_rebuild=True, reprocessing data...")
@@ -267,22 +276,34 @@ class RTDataModule(L.LightningDataModule):
         with open(stats_path, "w") as f:
             json.dump(stats, f, indent=2)
         
-        # Create and save Chemprop datasets
-        print("[RTDataModule] Creating and saving Chemprop datasets...")
         rt_mean = stats["rt_mean"]
         rt_std = stats["rt_std"]
         
-        train_chemprop = self._polars_to_chemprop(train_df, rt_mean, rt_std)
-        val_chemprop = self._polars_to_chemprop(val_df, rt_mean, rt_std)
-        test_chemprop = self._polars_to_chemprop(test_df, rt_mean, rt_std)
-        
-        with open(chemprop_train_path, "wb") as f:
-            pickle.dump(train_chemprop, f)
-        with open(chemprop_val_path, "wb") as f:
-            pickle.dump(val_chemprop, f)
-        with open(chemprop_test_path, "wb") as f:
-            pickle.dump(test_chemprop, f)
-        
+        # Create and save datasets based on model type
+        if self.model_type == "chemprop":
+            print("[RTDataModule] Creating and saving Chemprop datasets...")
+            train_chemprop = self._polars_to_chemprop(train_df, rt_mean, rt_std)
+            val_chemprop = self._polars_to_chemprop(val_df, rt_mean, rt_std)
+            test_chemprop = self._polars_to_chemprop(test_df, rt_mean, rt_std)
+            
+            with open(chemprop_train_path, "wb") as f:
+                pickle.dump(train_chemprop, f)
+            with open(chemprop_val_path, "wb") as f:
+                pickle.dump(val_chemprop, f)
+            with open(chemprop_test_path, "wb") as f:
+                pickle.dump(test_chemprop, f)
+        else:
+            print("[RTDataModule] Creating and saving PyG graphs to LMDB...")
+            train_pyg = self._polars_to_pyg(train_df, rt_mean, rt_std)
+            val_pyg = self._polars_to_pyg(val_df, rt_mean, rt_std)
+            test_pyg = self._polars_to_pyg(test_df, rt_mean, rt_std)
+            
+            # Save to LMDB
+            LMDBGraphDataset.from_graphs(train_pyg, str(lmdb_train_path))
+            LMDBGraphDataset.from_graphs(val_pyg, str(lmdb_val_path))
+            LMDBGraphDataset.from_graphs(test_pyg, str(lmdb_test_path))
+            print(f"[RTDataModule] Saved {len(train_pyg)} train, {len(val_pyg)} val, {len(test_pyg)} test graphs to LMDB")
+
         print(f"[RTDataModule] prepare_data: END - saved to {self.output_dir}")
     
     def setup(self, stage: Optional[str] = None):
@@ -315,14 +336,15 @@ class RTDataModule(L.LightningDataModule):
             with open(chemprop_test_path, "rb") as f:
                 self.test_dataset = pickle.load(f)
         else:
-            # For custom GNN, load polars dataframes
-            train_df = pl.read_parquet(self.output_dir / self.config.train_file)
-            val_df = pl.read_parquet(self.output_dir / self.config.val_file)
-            test_df = pl.read_parquet(self.output_dir / self.config.test_file)
+            # Load LMDB datasets for custom GNN
+            print("[RTDataModule] Loading LMDB graph datasets...")
+            lmdb_train_path = self.output_dir / "train_graphs.lmdb"
+            lmdb_val_path = self.output_dir / "val_graphs.lmdb"
+            lmdb_test_path = self.output_dir / "test_graphs.lmdb"
             
-            self.train_dataset = train_df
-            self.val_dataset = val_df
-            self.test_dataset = test_df
+            self.train_dataset = LMDBGraphDataset(str(lmdb_train_path), readonly=True)
+            self.val_dataset = LMDBGraphDataset(str(lmdb_val_path), readonly=True)
+            self.test_dataset = LMDBGraphDataset(str(lmdb_test_path), readonly=True)
         
         print(f"[RTDataModule] setup: train={len(self.train_dataset)}, "
               f"val={len(self.val_dataset)}, test={len(self.test_dataset)}")
@@ -353,6 +375,36 @@ class RTDataModule(L.LightningDataModule):
         
         return MoleculeDataset(datapoints)
     
+    def _polars_to_pyg(self, df, rt_mean: float, rt_std: float):
+        """Convert Polars DataFrame to PyG dataset."""
+        graphs = []
+        skipped = 0
+        
+        for row in df.iter_rows(named=True):
+            inchi = row[self.config.inchi_column]
+            rt = row[self.config.rt_column]
+            
+            # Normalize RT
+            rt_norm = (rt - rt_mean) / rt_std
+            
+            # Convert InChI to RDKit mol
+            mol = Chem.MolFromInchi(inchi)
+            if mol is None:
+                skipped += 1
+                continue
+            
+            smiles = Chem.MolToSmiles(mol)
+            
+            # Create PyG graph
+            graph = pyg.utils.from_smiles(smiles)
+            graph.y = torch.tensor([rt_norm], dtype=torch.float)
+            graphs.append(graph)
+        
+        if skipped > 0:
+            print(f"[Warning] Skipped {skipped} invalid InChI structures when creating PyG graphs")
+        
+        return graphs
+
     def train_dataloader(self):
         """Training dataloader."""
         if self.model_type == "chemprop":
@@ -361,12 +413,20 @@ class RTDataModule(L.LightningDataModule):
                 batch_size=self.batch_size,
                 num_workers=self.num_workers,
                 shuffle=True,
-                pin_memory=True,  # Add this
-                persistent_workers=self.num_workers > 0,  # Add this
+                pin_memory=True,
+                persistent_workers=self.num_workers > 0,
             )
         else:
-            # Custom GNN - you'll implement this
-            raise NotImplementedError("Custom GNN dataloader not implemented yet")
+            # Custom GNN with PyG DataLoader
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                shuffle=True,
+                pin_memory=True,
+                prefetch_factor=4,
+                persistent_workers=self.num_workers > 0,
+            )
     
     def val_dataloader(self):
         """Validation dataloader."""
@@ -376,11 +436,19 @@ class RTDataModule(L.LightningDataModule):
                 batch_size=self.batch_size,
                 num_workers=self.num_workers,
                 shuffle=False,
-                pin_memory=True,  # Add this
-                persistent_workers=self.num_workers > 0,  # Add this
+                pin_memory=True,
+                persistent_workers=self.num_workers > 0,
             )
         else:
-            raise NotImplementedError("Custom GNN dataloader not implemented yet")
+            return DataLoader(
+                self.val_dataset,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                shuffle=False,
+                pin_memory=True,
+                prefetch_factor=4,
+                persistent_workers=self.num_workers > 0,
+            )
     
     def test_dataloader(self):
         """Test dataloader."""
@@ -390,8 +458,16 @@ class RTDataModule(L.LightningDataModule):
                 batch_size=self.batch_size,
                 num_workers=self.num_workers,
                 shuffle=False,
-                pin_memory=True,  # Add this
-                persistent_workers=self.num_workers > 0,  # Add this
+                pin_memory=True,
+                persistent_workers=self.num_workers > 0,
             )
         else:
-            raise NotImplementedError("Custom GNN dataloader not implemented yet")
+            return DataLoader(
+                self.test_dataset,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                shuffle=False,
+                pin_memory=True,
+                prefetch_factor=4,
+                persistent_workers=self.num_workers > 0,
+            )
