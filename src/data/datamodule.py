@@ -200,6 +200,7 @@ class RTDataModule(L.LightningDataModule):
         """
         Download and prepare data (runs once on main process).
         Here we load, preprocess, split, and save the data.
+        Creates BOTH Chemprop and PyG datasets for flexibility.
         """
         print("[RTDataModule] prepare_data: START")
         
@@ -216,6 +217,8 @@ class RTDataModule(L.LightningDataModule):
         # Check if already processed
         train_path = self.output_dir / self.config.train_file
         stats_path = self.output_dir / "stats.json"
+        
+        # Paths for both dataset types
         chemprop_train_path = self.output_dir / "train_chemprop.pkl"
         chemprop_val_path = self.output_dir / "val_chemprop.pkl"
         chemprop_test_path = self.output_dir / "test_chemprop.pkl"
@@ -223,13 +226,17 @@ class RTDataModule(L.LightningDataModule):
         lmdb_val_path = self.output_dir / "val_graphs.lmdb"
         lmdb_test_path = self.output_dir / "test_graphs.lmdb"
         
-        if (train_path.exists() and stats_path.exists() and not self.force_rebuild):
-            if self.model_type == "chemprop" and all(p.exists() for p in [chemprop_train_path, chemprop_val_path, chemprop_test_path]):
-                print(f"[RTDataModule] Processed data already exists in {self.output_dir}, skipping.")
-                return
-            elif self.model_type != "chemprop" and all(p.exists() for p in [lmdb_train_path, lmdb_val_path, lmdb_test_path]):
-                print(f"[RTDataModule] Processed data already exists in {self.output_dir}, skipping.")
-                return
+        # Check if all datasets exist
+        all_paths_exist = (
+            train_path.exists() and 
+            stats_path.exists() and
+            all(p.exists() for p in [chemprop_train_path, chemprop_val_path, chemprop_test_path]) and
+            all(p.exists() for p in [lmdb_train_path, lmdb_val_path, lmdb_test_path])
+        )
+        
+        if all_paths_exist and not self.force_rebuild:
+            print(f"[RTDataModule] All processed data already exists in {self.output_dir}, skipping.")
+            return
         
         if self.force_rebuild:
             print("[RTDataModule] force_rebuild=True, reprocessing data...")
@@ -279,32 +286,32 @@ class RTDataModule(L.LightningDataModule):
         rt_mean = stats["rt_mean"]
         rt_std = stats["rt_std"]
         
-        # Create and save datasets based on model type
-        if self.model_type == "chemprop":
-            print("[RTDataModule] Creating and saving Chemprop datasets...")
-            train_chemprop = self._polars_to_chemprop(train_df, rt_mean, rt_std)
-            val_chemprop = self._polars_to_chemprop(val_df, rt_mean, rt_std)
-            test_chemprop = self._polars_to_chemprop(test_df, rt_mean, rt_std)
-            
-            with open(chemprop_train_path, "wb") as f:
-                pickle.dump(train_chemprop, f)
-            with open(chemprop_val_path, "wb") as f:
-                pickle.dump(val_chemprop, f)
-            with open(chemprop_test_path, "wb") as f:
-                pickle.dump(test_chemprop, f)
-        else:
-            print("[RTDataModule] Creating and saving PyG graphs to LMDB...")
-            train_pyg = self._polars_to_pyg(train_df, rt_mean, rt_std)
-            val_pyg = self._polars_to_pyg(val_df, rt_mean, rt_std)
-            test_pyg = self._polars_to_pyg(test_df, rt_mean, rt_std)
-            
-            # Save to LMDB
-            LMDBGraphDataset.from_graphs(train_pyg, str(lmdb_train_path))
-            LMDBGraphDataset.from_graphs(val_pyg, str(lmdb_val_path))
-            LMDBGraphDataset.from_graphs(test_pyg, str(lmdb_test_path))
-            print(f"[RTDataModule] Saved {len(train_pyg)} train, {len(val_pyg)} val, {len(test_pyg)} test graphs to LMDB")
+        # Create and save BOTH dataset types for flexibility
+        print("[RTDataModule] Creating and saving Chemprop datasets...")
+        train_chemprop = self._polars_to_chemprop(train_df, rt_mean, rt_std)
+        val_chemprop = self._polars_to_chemprop(val_df, rt_mean, rt_std)
+        test_chemprop = self._polars_to_chemprop(test_df, rt_mean, rt_std)
+        
+        with open(chemprop_train_path, "wb") as f:
+            pickle.dump(train_chemprop, f)
+        with open(chemprop_val_path, "wb") as f:
+            pickle.dump(val_chemprop, f)
+        with open(chemprop_test_path, "wb") as f:
+            pickle.dump(test_chemprop, f)
+        print(f"[RTDataModule] Saved Chemprop datasets: {len(train_chemprop)} train, {len(val_chemprop)} val, {len(test_chemprop)} test")
+        
+        print("[RTDataModule] Creating and saving PyG graphs to LMDB...")
+        train_pyg = self._polars_to_pyg(train_df, rt_mean, rt_std)
+        val_pyg = self._polars_to_pyg(val_df, rt_mean, rt_std)
+        test_pyg = self._polars_to_pyg(test_df, rt_mean, rt_std)
+        
+        # Save to LMDB
+        LMDBGraphDataset.from_graphs(train_pyg, str(lmdb_train_path))
+        LMDBGraphDataset.from_graphs(val_pyg, str(lmdb_val_path))
+        LMDBGraphDataset.from_graphs(test_pyg, str(lmdb_test_path))
+        print(f"[RTDataModule] Saved PyG LMDB datasets: {len(train_pyg)} train, {len(val_pyg)} val, {len(test_pyg)} test")
 
-        print(f"[RTDataModule] prepare_data: END - saved to {self.output_dir}")
+        print(f"[RTDataModule] prepare_data: END - saved both dataset types to {self.output_dir}")
     
     def setup(self, stage: Optional[str] = None):
         """
