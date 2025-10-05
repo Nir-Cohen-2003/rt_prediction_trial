@@ -36,8 +36,8 @@ def build_model(model_config: ModelConfig) -> nn.Module:
             from .deep_gcn_pyg import build_deep_gcn
             return build_deep_gcn(model_config)
         else:
-            from .pyg_model import build_pyg_gnn
-            return build_pyg_gnn(model_config)
+            from .generic_pyg import build_pyg_model
+            return build_pyg_model(model_config)
     else:
         raise ValueError(
             f"Unknown model_type: '{model_type}'. "

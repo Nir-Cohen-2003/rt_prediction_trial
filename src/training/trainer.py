@@ -14,10 +14,10 @@ from ..model.model import build_model
 torch.set_float32_matmul_precision('medium')
 class ChempropRTModule(L.LightningModule):
     """
-    Lightning module wrapping Chemprop for RT prediction.
+    Lightning module wrapping models for RT prediction.
     
     This module handles:
-    - Forward pass
+    - Forward pass (supports both Chemprop and PyG models)
     - Training/validation/test steps with loss computation
     - Optimizer and scheduler configuration
     - Metric logging (MAE, RMSE on denormalized values)
@@ -26,19 +26,22 @@ class ChempropRTModule(L.LightningModule):
     def __init__(
         self,
         model,
+        model_type: str,
         training_config: TrainingConfig,
         rt_mean: float,
         rt_std: float
     ):
         """
         Args:
-            model: Pre-built Chemprop MPNN model
+            model: Pre-built model (Chemprop MPNN or PyG GNN)
+            model_type: "chemprop" or "pyg"
             training_config: Training configuration (optimizer, scheduler, etc.)
             rt_mean: Mean RT for denormalization
             rt_std: Std RT for denormalization
         """
         super().__init__()
         self.model = model
+        self.model_type = model_type
         self.training_config = training_config
         self.rt_mean = rt_mean
         self.rt_std = rt_std
@@ -54,20 +57,24 @@ class ChempropRTModule(L.LightningModule):
         Forward pass through the model.
         
         Args:
-            batch: Chemprop batch containing molecular graphs
+            batch: Chemprop batch (with .bmg attribute) or PyG batch (Data object)
         
         Returns:
             Predictions (normalized RT values)
         """
-        # Extract the BatchMolGraph from the TrainingBatch
-        return self.model(batch.bmg)
+        if self.model_type == "chemprop":
+            # Extract the BatchMolGraph from the TrainingBatch
+            return self.model(batch.bmg)
+        else:
+            # PyG models expect the batch directly
+            return self.model(batch)
     
     def _shared_step(self, batch, batch_idx: int, stage: str):
         """
         Shared step logic for train/val/test.
         
         Args:
-            batch: Chemprop batch
+            batch: Chemprop batch or PyG batch
             batch_idx: Batch index
             stage: One of "train", "val", or "test"
         
@@ -76,8 +83,13 @@ class ChempropRTModule(L.LightningModule):
         """
         # Forward pass
         preds = self(batch).squeeze(-1)
-        # Extract targets from the TrainingBatch
-        targets = batch.Y.squeeze(-1)
+        
+        # Extract targets depending on model type
+        if self.model_type == "chemprop":
+            targets = batch.Y.squeeze(-1)
+        else:
+            # PyG batch
+            targets = batch.y.squeeze(-1)
         
         # Get actual batch size
         batch_size = len(targets)
@@ -251,6 +263,7 @@ def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTD
     # Wrap in Lightning module
     module = ChempropRTModule(
         model=model,
+        model_type=config.model.model_type,
         training_config=config.training,
         rt_mean=datamodule.rt_mean,
         rt_std=datamodule.rt_std
