@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Literal, Optional
 from pathlib import Path
 
@@ -37,7 +37,7 @@ class DataConfig:
         self.output_dir = Path(self.output_dir)
 
 @dataclass
-class deepgcnConfig:
+class DeepGCNConfig:
     """Configuration specific to DeepGCN models."""
     
     norm_type: Literal["batch", "layer", "instance"] = "layer"
@@ -46,6 +46,7 @@ class deepgcnConfig:
     gen_aggr: Literal["softmax", "power"] = "softmax"  # GENConv aggregation type
     mlp_layers: int = 1  # Number of MLP layers in GENConv
     num_timesteps: int = 2  # For AttentiveFP readout
+    
 @dataclass
 class PyGModelConfig:
     """Configuration specific to PyTorch Geometric models."""
@@ -61,12 +62,12 @@ class PyGModelConfig:
     pool_dim_feedforward: int = 16  # For Transformer pooling
     
     # DeeperGCN specific settings
-    deepgcn: deepgcnConfig = field(default_factory=deepgcnConfig)
+    deepgcn: DeepGCNConfig = field(default_factory=DeepGCNConfig)
     
     # Generic GNN settings (for GCN, GAT, GIN, etc.)
-    gnn_type: Literal["gcn", "gin","transformer", "deepgcn"] = "gcn"
-    num_heads: int = 4  # For  transformer
-    edge_dim: Optional[int] = None  # Edge feature dimension for models that support it
+    gnn_type: Literal["gcn", "gin", "transformer", "deepgcn"] = "gcn"
+    num_heads: int = 4  # For transformer
+    use_edge_features: bool = True  # Whether to use edge features in message passing
 
 @dataclass
 class ModelConfig:
@@ -78,11 +79,12 @@ class ModelConfig:
     use_chemeleon: bool = False
     chemeleon_checkpoint: Optional[str] = None  # Path or URL to CheMeleon checkpoint
     freeze_chemeleon: bool = False  # Whether to freeze the pretrained encoder
+    chemeleon_num_layers: Optional[int] = None  # Number of layers in pretrained model (if known)
     
     # Common settings for all models
-    message_hidden_dim: int = 300
-    num_layers: int = 3
-    ffn_hidden_dim: int = 300
+    message_hidden_dim: int = 64
+    num_layers: int = 2
+    ffn_hidden_dim: int = 64
     ffn_num_layers: int = 2
     dropout: float = 0.0
     activation: Literal["relu", "leakyrelu", "elu"] = "relu"
@@ -107,12 +109,24 @@ class ModelConfig:
             raise ValueError("Attentive aggregation is only supported in Chemprop models.")
         
         # Validate CheMeleon settings
-        if self.use_chemeleon and self.chemeleon_checkpoint is None:
-            raise ValueError("chemeleon_checkpoint must be provided when use_chemeleon=True")
+        if self.use_chemeleon:
+            if self.chemeleon_checkpoint is None:
+                raise ValueError("chemeleon_checkpoint must be provided when use_chemeleon=True")
+            if self.model_type != "chemprop":
+                raise ValueError("CheMeleon can only be used with model_type='chemprop'")
+        
+        # Validate model_type is recognized
+        valid_types = ["chemprop", "gcn", "gat", "gin", "mpnn", "deepgcn", "deep_gcn"]
+        if self.model_type not in valid_types:
+            raise ValueError(f"model_type must be one of {valid_types}, got '{self.model_type}'")
         
         # Ensure pyg config is initialized
         if not isinstance(self.pyg, PyGModelConfig):
             self.pyg = PyGModelConfig(**self.pyg) if isinstance(self.pyg, dict) else PyGModelConfig()
+        
+        # Validate edge feature usage for specific GNN types
+        if self.model_type in ["gcn", "gin"] and self.pyg.gnn_type not in ["gcn", "gin", "transformer"]:
+            raise ValueError(f"gnn_type '{self.pyg.gnn_type}' not compatible with model_type '{self.model_type}'")
 
 
 @dataclass
@@ -175,5 +189,4 @@ class Config:
     
     def to_dict(self) -> dict:
         """Convert config to dictionary for serialization."""
-        from dataclasses import asdict
         return asdict(self)

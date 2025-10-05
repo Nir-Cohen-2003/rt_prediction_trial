@@ -45,22 +45,30 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
         else:
             raise ValueError("Checkpoint does not contain 'state_dict'")
         
-        # Create a new MPNN model with the same architecture as CheMeleon
-        # We need to infer the architecture from the state dict
-        # This is a common pattern for 100M/300M CheMeleon models
+        # Infer architecture from checkpoint or use config override
         try:
             # Try to infer dimensions from the state dict
             message_hidden_dim = state_dict['message_passing.W_i.weight'].shape[0]
             print(f"[build_chemprop_mpnn] Inferred message_hidden_dim={message_hidden_dim} from checkpoint")
         except KeyError:
-            # Fallback to config or common CheMeleon dimensions
-            message_hidden_dim = 1200 if "300m" in str(checkpoint_path).lower() else 300
-            print(f"[build_chemprop_mpnn] Using default message_hidden_dim={message_hidden_dim}")
+            # Fallback to config value
+            message_hidden_dim = cfg.message_hidden_dim
+            print(f"[build_chemprop_mpnn] Using config message_hidden_dim={message_hidden_dim}")
         
-        # Build message passing with inferred dimensions
+        # Infer number of layers if not explicitly provided
+        if cfg.chemeleon_num_layers is not None:
+            num_layers = cfg.chemeleon_num_layers
+            print(f"[build_chemprop_mpnn] Using config-specified num_layers={num_layers}")
+        else:
+            # Count layers in state dict
+            layer_keys = [k for k in state_dict.keys() if k.startswith('message_passing.') and '.W_i.' in k]
+            num_layers = len(layer_keys) if layer_keys else cfg.num_layers
+            print(f"[build_chemprop_mpnn] Inferred num_layers={num_layers} from checkpoint")
+        
+        # Build message passing with inferred/config dimensions
         message_passing = BondMessagePassing(
             d_h=message_hidden_dim,
-            depth=cfg.num_layers,  # This might need to be inferred too
+            depth=num_layers,
             dropout=cfg.dropout,
             activation=cfg.activation,
         )

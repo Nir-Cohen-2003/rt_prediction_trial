@@ -103,56 +103,6 @@ class GENConv(MessagePassing):
             raise ValueError(f"Unknown aggregator: {self.aggregator}")
 
 
-class AttentiveFPReadout(nn.Module):
-    """
-    Attentive readout layer from AttentiveFP.
-    
-    Args:
-        feat_dim: Feature dimension
-        num_timesteps: Number of GRU steps
-        dropout: Dropout rate
-    """
-    
-    def __init__(self, feat_dim, num_timesteps=2, dropout=0.0):
-        super(AttentiveFPReadout, self).__init__()
-        
-        self.feat_dim = feat_dim
-        self.num_timesteps = num_timesteps
-        self.dropout = dropout
-        
-        self.gru = nn.GRUCell(feat_dim, feat_dim)
-        self.attend = nn.Linear(feat_dim, 1, bias=False)
-        self.transform = nn.Linear(feat_dim * 2, feat_dim)
-    
-    def forward(self, x, batch):
-        """
-        Args:
-            x: Node features [num_nodes, feat_dim]
-            batch: Batch assignment [num_nodes]
-        
-        Returns:
-            Graph-level features [batch_size, feat_dim]
-        """
-        # Initialize with mean pooling
-        h = global_mean_pool(x, batch)
-        
-        for _ in range(self.num_timesteps):
-            # Compute attention scores
-            scores = self.attend(x)  # [num_nodes, 1]
-            scores = softmax(scores.squeeze(), batch)  # [num_nodes]
-            
-            # Weighted sum of node features
-            context = torch.zeros_like(h).index_add_(
-                0, batch, x * scores.unsqueeze(-1)
-            )
-            
-            # Update with GRU
-            h = F.dropout(h, p=self.dropout, training=self.training)
-            h = self.gru(context, h)
-        
-        return h
-
-
 class DeeperGCN(nn.Module):
     """
     DeeperGCN model for molecular property prediction.
@@ -175,6 +125,8 @@ class DeeperGCN(nn.Module):
         pool_ratio: Ratio for hierarchical pooling (SAG, TopK)
         pool_num_heads: Number of heads for transformer pooling
         pool_dim_feedforward: Feedforward dimension for transformer pooling
+        ffn_hidden_dim: Hidden dimension for output MLP
+        ffn_num_layers: Number of layers in output MLP
     """
     
     def __init__(self,
@@ -191,7 +143,9 @@ class DeeperGCN(nn.Module):
                  pool_type='mean',
                  pool_ratio=0.5,
                  pool_num_heads=4,
-                 pool_dim_feedforward=128):
+                 pool_dim_feedforward=128,
+                 ffn_hidden_dim=300,
+                 ffn_num_layers=2):
         super(DeeperGCN, self).__init__()
         
         self.num_layers = num_layers
@@ -248,15 +202,18 @@ class DeeperGCN(nn.Module):
         else:
             raise ValueError(f"Unknown pool_type: {pool_type}")
         
-        # Output layers
-        self.out = gnn.MLP(
-            in_channels=hid_dim,
-            hidden_channels=1024,
-            out_channels=1,
-            num_layers=2,
-            dropout=dropout,
-            act='relu'
-        )
+        # Output MLP - now uses config values
+        mlp_list = []
+        for i in range(ffn_num_layers):
+            if i == 0:
+                mlp_list.append(nn.Linear(hid_dim, ffn_hidden_dim))
+            else:
+                mlp_list.append(nn.Linear(ffn_hidden_dim, ffn_hidden_dim))
+            mlp_list.append(nn.ReLU())
+            mlp_list.append(nn.Dropout(dropout))
+        mlp_list.append(nn.Linear(ffn_hidden_dim, 1))
+        
+        self.out_mlp = nn.Sequential(*mlp_list)
     
     def forward(self, data):
         """
@@ -289,7 +246,7 @@ class DeeperGCN(nn.Module):
             graph_feat = self.readout(x, edge_index, batch, edge_attr)
         
         # Final prediction
-        out = self.out(graph_feat)
+        out = self.out_mlp(graph_feat)
         
         return out
 
@@ -312,18 +269,20 @@ def build_deep_gcn(model_config: ModelConfig) -> nn.Module:
         hid_dim=model_config.message_hidden_dim,
         num_layers=model_config.num_layers,
         dropout=model_config.dropout,
-        norm=pyg_cfg.norm_type,
-        beta=pyg_cfg.beta,
-        learn_beta=pyg_cfg.learn_beta,
-        aggr=pyg_cfg.gen_aggr,
-        mlp_layers=pyg_cfg.mlp_layers,
+        norm=pyg_cfg.deepgcn.norm_type,
+        beta=pyg_cfg.deepgcn.beta,
+        learn_beta=pyg_cfg.deepgcn.learn_beta,
+        aggr=pyg_cfg.deepgcn.gen_aggr,
+        mlp_layers=pyg_cfg.deepgcn.mlp_layers,
         pool_type=pyg_cfg.pool_type,
         pool_ratio=pyg_cfg.pool_ratio,
         pool_num_heads=pyg_cfg.pool_num_heads,
-        pool_dim_feedforward=pyg_cfg.pool_dim_feedforward
+        pool_dim_feedforward=pyg_cfg.pool_dim_feedforward,
+        ffn_hidden_dim=model_config.ffn_hidden_dim,
+        ffn_num_layers=model_config.ffn_num_layers
     )
     
     return model
 
 
-__all__ = ['DeeperGCN', 'GENConv', 'AttentiveFPReadout', 'build_deep_gcn']
+__all__ = ['DeeperGCN', 'GENConv', 'build_deep_gcn']

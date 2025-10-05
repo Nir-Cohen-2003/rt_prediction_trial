@@ -32,10 +32,10 @@ def build_model(model_config: ModelConfig) -> nn.Module:
         from .chemprop_model import build_chemprop_mpnn
         return build_chemprop_mpnn(model_config)
     
-    elif model_type in ["gcn", "gat", "gin", "mpnn", "deepgcn"]:
+    elif model_type in ["gcn", "gin"]:
         from .generic_pyg import build_pyg_model
         return build_pyg_model(model_config)
-    
+
     elif model_type == "deep_gcn":
         from .deep_gcn_pyg import build_deep_gcn
         return build_deep_gcn(model_config)
