@@ -3,7 +3,7 @@
 # Optimization
 learning_rate: 0.001
 batch_size: 1024
-num_epochs: 50
+num_epochs: 200
 optimizer: "adam"
 weight_decay: 0.0
 
@@ -14,7 +14,7 @@ scheduler_patience: 10
 scheduler_factor: 0.5
 
 # Early stopping
-early_stop_patience: 20
+early_stop_patience: 30
 monitor_metric: "val/mae"
 monitor_mode: "min"
 

@@ -12,7 +12,7 @@ import torch_geometric.nn as gnn
 from torch_geometric.nn import MessagePassing, global_mean_pool, global_add_pool, global_max_pool
 from torch_geometric.utils import softmax
 from ..config import ModelConfig
-from .pyg_components import TransformerPool, SAGPool, TopKPool, get_activation
+from .pyg_components import TransformerPool, SAGPool, TopKPool, AttentiveFPReadout, get_activation
 
 class GENConv(MessagePassing):
     """
@@ -135,10 +135,11 @@ class DeeperGCN(nn.Module):
         learn_beta: Whether beta is learnable
         aggr: Aggregation type ('softmax', 'power')
         mlp_layers: Number of MLP layers in GENConv
-        pool_type: Type of pooling ('mean', 'sum', 'max', 'transformer', 'sag', 'topk')
+        pool_type: Type of pooling ('mean', 'sum', 'max', 'transformer', 'sag', 'topk', 'attentivefp')
         pool_ratio: Ratio for hierarchical pooling (SAG, TopK)
         pool_num_heads: Number of heads for transformer pooling
         pool_dim_feedforward: Feedforward dimension for transformer pooling
+        pool_num_timesteps: Number of GRU timesteps for AttentiveFP readout
         ffn_hidden_dim: Hidden dimension for output MLP
         ffn_num_layers: Number of layers in output MLP
     """
@@ -159,6 +160,7 @@ class DeeperGCN(nn.Module):
                  pool_ratio=0.5,
                  pool_num_heads=4,
                  pool_dim_feedforward=128,
+                 pool_num_timesteps=2,
                  ffn_hidden_dim=300,
                  ffn_num_layers=2):
         super(DeeperGCN, self).__init__()
@@ -218,10 +220,16 @@ class DeeperGCN(nn.Module):
             self.readout = SAGPool(in_channels=hid_dim, ratio=pool_ratio)
         elif pool_type == 'topk':
             self.readout = TopKPool(in_channels=hid_dim, ratio=pool_ratio)
+        elif pool_type == 'attentivefp':
+            self.readout = AttentiveFPReadout(
+                feat_size=hid_dim,
+                num_timesteps=pool_num_timesteps,
+                dropout=dropout
+            )
         else:
             raise ValueError(f"Unknown pool_type: {pool_type}")
         
-        # Output MLP
+        # Output MLP - configurable architecture
         mlp_list = []
         for i in range(ffn_num_layers):
             if i == 0:
@@ -261,6 +269,8 @@ class DeeperGCN(nn.Module):
         # Graph-level readout
         if self.pool_type in ['mean', 'sum', 'max']:
             graph_feat = self.readout(x, batch, edge_index, edge_attr)
+        elif self.pool_type == 'attentivefp':
+            graph_feat = self.readout(x, batch)
         else:
             graph_feat = self.readout(x, edge_index, batch, edge_attr)
         
@@ -303,11 +313,11 @@ def build_deep_gcn(model_config: ModelConfig) -> nn.Module:
         pool_ratio=pyg_cfg.pool_ratio,
         pool_num_heads=pyg_cfg.pool_num_heads,
         pool_dim_feedforward=pyg_cfg.pool_dim_feedforward,
+        pool_num_timesteps=pyg_cfg.pool_num_timesteps,
         ffn_hidden_dim=model_config.ffn_hidden_dim,
         ffn_num_layers=model_config.ffn_num_layers
     )
     
     return model
 
-__all__ = ['DeeperGCN', 'GENConv', 'build_deep_gcn']
 __all__ = ['DeeperGCN', 'GENConv', 'build_deep_gcn']

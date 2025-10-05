@@ -3,9 +3,13 @@
 model_type: "pyg"  # Options: "chemprop" or "pyg"
 
 # Common settings for ALL models
-message_hidden_dim: 64
+# message_hidden_dim controls the hidden dimension of GNN layers
+# num_layers controls the number of GNN layers
+# ffn_hidden_dim controls the width of the final output MLP
+# ffn_num_layers controls the number of layers in the final output MLP
+message_hidden_dim: 200
 num_layers: 8
-ffn_hidden_dim: 64
+ffn_hidden_dim: 1024
 ffn_num_layers: 2
 dropout: 0.0
 
@@ -25,10 +29,11 @@ pyg:
   edge_dim: null    # For TransformerConv, defaults to edge_in_dim if None
   
   # Pooling configuration
-  pool_type: "mean"  # Options: "mean", "sum", "max", "transformer", "sag", "topk"
+  pool_type: "attentivefp" 
   pool_ratio: 0.5
   pool_num_heads: 4
   pool_dim_feedforward: 16
+  pool_num_timesteps: 2  # Only for AttentiveFP readout
   
   # Generic GNN settings
   gnn_type: "deepgcn"  # Options: "gcn", "gin", "transformer", "deepgcn"
@@ -42,5 +47,4 @@ pyg:
     beta: 1.0
     learn_beta: true
     gen_aggr: "softmax"  # Options: "softmax", "power"
-    mlp_layers: 1
-    num_timesteps: 2
+    mlp_layers: 1  # Number of MLP layers for GENConv message transformation (not output MLP)

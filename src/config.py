@@ -59,8 +59,7 @@ class DeepGCNConfig:
     beta: float = 1.0
     learn_beta: bool = True
     gen_aggr: Literal["softmax", "power"] = "softmax"
-    mlp_layers: int = 1
-    num_timesteps: int = 2
+    mlp_layers: int = 1  # Number of MLP layers for GENConv message transformation
 
 
 @dataclass
@@ -73,10 +72,11 @@ class PyGModelConfig:
     edge_dim: Optional[int] = None  # For TransformerConv, defaults to edge_in_dim if None
     
     # Pooling configuration
-    pool_type: Literal["mean", "sum", "max", "transformer", "sag", "topk"] = "mean"
+    pool_type: Literal["mean", "sum", "max", "transformer", "sag", "topk", "attentivefp"] = "mean"
     pool_ratio: float = 0.5
     pool_num_heads: int = 4
     pool_dim_feedforward: int = 16
+    pool_num_timesteps: int = 2  # For AttentiveFP readout only
     
     # DeeperGCN specific settings
     deepgcn: DeepGCNConfig = field(default_factory=DeepGCNConfig)
@@ -90,6 +90,13 @@ class PyGModelConfig:
     def __post_init__(self):
         if self.gnn_type == "deepgcn" and not isinstance(self.deepgcn, DeepGCNConfig):
             self.deepgcn = DeepGCNConfig(**self.deepgcn) if isinstance(self.deepgcn, dict) else self.deepgcn
+        
+        # Validate AttentiveFP readout is only used with DeeperGCN
+        if self.pool_type == "attentivefp" and self.gnn_type != "deepgcn":
+            raise ValueError(
+                f"AttentiveFP readout (pool_type='attentivefp') can only be used with "
+                f"DeeperGCN models (gnn_type='deepgcn'), got gnn_type='{self.gnn_type}'"
+            )
 
 
 @dataclass

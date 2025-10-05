@@ -26,7 +26,7 @@ max_rt: null
 
 # Molecule featurization - applies to BOTH Chemprop and PyG models
 # Options: "simple", "v1", "v2", "organic", "rigr"
-featurizer_type: "rigr"
+featurizer_type: "v2"
 
 # SimpleMoleculeFeaturizer options (only used when featurizer_type="simple")
 atom_features: true
