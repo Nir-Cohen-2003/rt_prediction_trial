@@ -14,7 +14,7 @@ import time
 from ..config import DataConfig, ModelConfig, TrainingConfig
 from .trainer import ChempropRTModule
 from ..data.datamodule import RTDataModule
-from ..model.chemprop_model import build_chemprop_mpnn
+from ..model.model import build_model
 
 
 def load_yaml_to_dataclass(path: Path | None, cls):
@@ -437,17 +437,13 @@ def build_objective(data_cfg: DataConfig,
             dm.setup()
             
             # Build model
-            if model_cfg.model_type == "chemprop":
-                model = build_chemprop_mpnn(model_cfg)
-                module = ChempropRTModule(
-                    model=model,
-                    training_config=training_cfg,
-                    rt_mean=dm.rt_mean,
-                    rt_std=dm.rt_std
-                )
-            else:
-                raise NotImplementedError(f"Model type '{model_cfg.model_type}' not implemented")
-            
+            model = build_model(model_cfg)
+            module = ChempropRTModule(
+                model=model,
+                training_config=training_cfg,
+                rt_mean=dm.rt_mean,
+                rt_std=dm.rt_std
+            )
             # Create minimal trainer (no checkpointing or logging for speed)
             trainer = L.Trainer(
                 max_epochs=training_cfg.num_epochs,

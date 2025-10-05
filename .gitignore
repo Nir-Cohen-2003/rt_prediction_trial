@@ -9,3 +9,4 @@ checkpoints/**
 logs/**
 results/**
 **.e**
+node_modules/

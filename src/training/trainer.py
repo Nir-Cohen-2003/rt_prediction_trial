@@ -7,7 +7,7 @@ import json
 
 from ..config import Config, TrainingConfig
 from ..data.datamodule import RTDataModule
-from ..model.chemprop_model import build_chemprop_mpnn
+from ..model.model import build_model
 
 torch.set_float32_matmul_precision('medium')
 class ChempropRTModule(L.LightningModule):
@@ -242,25 +242,17 @@ def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTD
     datamodule.prepare_data()
     datamodule.setup()
     
-    # Build model based on model type
-    print("[train_from_config] Building model...")
-    if config.model.model_type == "chemprop":
-        # Build the Chemprop MPNN model
-        model = build_chemprop_mpnn(config.model)
-        
-        # Wrap in Lightning module
-        module = ChempropRTModule(
-            model=model,
-            training_config=config.training,
-            rt_mean=datamodule.rt_mean,
-            rt_std=datamodule.rt_std
-        )
-    else:
-        # Placeholder for custom GNN models
-        raise NotImplementedError(
-            f"Model type '{config.model.model_type}' not implemented yet. "
-            "Currently supported: 'chemprop'"
-        )
+    # Build model using generic factory
+    print(f"[train_from_config] Building {config.model.model_type} model...")
+    model = build_model(config.model)
+    
+    # Wrap in Lightning module
+    module = ChempropRTModule(
+        model=model,
+        training_config=config.training,
+        rt_mean=datamodule.rt_mean,
+        rt_std=datamodule.rt_std
+    )
     
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(

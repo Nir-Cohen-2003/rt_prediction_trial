@@ -38,24 +38,57 @@ class DataConfig:
 
 
 @dataclass
+class PyGModelConfig:
+    """Configuration specific to PyTorch Geometric models."""
+    
+    # Node and edge feature dimensions (usually inferred from data)
+    node_in_dim: int = 133  # RDKit default atom features
+    edge_in_dim: int = 14   # RDKit default bond features
+    
+    # Pooling configuration
+    pool_type: Literal["mean", "sum", "max", "transformer", "sag", "topk"] = "mean"
+    pool_ratio: float = 0.5  # For SAG and TopK pooling
+    pool_num_heads: int = 4  # For Transformer pooling
+    pool_dim_feedforward: int = 128  # For Transformer pooling
+    
+    # DeeperGCN specific settings
+    norm_type: Literal["batch", "layer", "instance"] = "layer"
+    beta: float = 1.0  # Initial inverse temperature for GENConv
+    learn_beta: bool = True  # Whether beta is learnable
+    gen_aggr: Literal["softmax", "power"] = "softmax"  # GENConv aggregation type
+    mlp_layers: int = 1  # Number of MLP layers in GENConv
+    num_timesteps: int = 2  # For AttentiveFP readout
+    
+    # Generic GNN settings (for GCN, GAT, GIN, etc.)
+    gnn_type: Literal["gcn", "gat", "gin", "mpnn", "deepgcn"] = "gcn"
+    num_heads: int = 4  # For GAT
+    edge_dim: Optional[int] = None  # Edge feature dimension for models that support it
+
+
+@dataclass
 class ModelConfig:
     """Configuration for the prediction model (Chemprop or custom GNN)."""
     
-    model_type: Literal["chemprop", "custom_gnn", "chemeleon"] = "chemprop"
+    model_type: Literal["chemprop", "gcn", "gat", "gin", "mpnn", "deepgcn", "deep_gcn"] = "chemprop"
     
     # CheMeleon specific settings
     use_chemeleon: bool = False
     chemeleon_checkpoint: Optional[str] = None  # Path or URL to CheMeleon checkpoint
     freeze_chemeleon: bool = False  # Whether to freeze the pretrained encoder
     
-    # Chemprop specific settings
+    # Common settings for all models
     message_hidden_dim: int = 300
     num_layers: int = 3
     ffn_hidden_dim: int = 300
     ffn_num_layers: int = 2
     dropout: float = 0.0
     activation: Literal["relu", "leakyrelu", "elu"] = "relu"
+    
+    # Chemprop specific settings
     aggregation: Literal["mean", "sum", "norm", "attentive"] = "mean"
+    
+    # PyTorch Geometric specific settings
+    pyg: PyGModelConfig = field(default_factory=PyGModelConfig)
     
     # For custom GNN (you'll implement)
     custom_gnn_class: Optional[str] = None  # e.g., "SimpleGNNRegressor"
@@ -65,7 +98,7 @@ class ModelConfig:
     additional_feature_dim: int = 0
     
     def __post_init__(self):
-        """Validate model_type and custom_gnn_class."""
+        """Validate model_type and settings."""
         # attentive is possible only in chemprop
         if self.model_type != "chemprop" and self.aggregation == "attentive":
             raise ValueError("Attentive aggregation is only supported in Chemprop models.")
@@ -73,6 +106,11 @@ class ModelConfig:
         # Validate CheMeleon settings
         if self.use_chemeleon and self.chemeleon_checkpoint is None:
             raise ValueError("chemeleon_checkpoint must be provided when use_chemeleon=True")
+        
+        # Ensure pyg config is initialized
+        if not isinstance(self.pyg, PyGModelConfig):
+            self.pyg = PyGModelConfig(**self.pyg) if isinstance(self.pyg, dict) else PyGModelConfig()
+
 
 @dataclass
 class TrainingConfig:
