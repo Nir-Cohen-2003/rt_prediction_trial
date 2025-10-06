@@ -29,3 +29,7 @@ pytorch-gpu = ">=2.7.0"
 cuda-version = "12.6.*"
 pytorch_geometric = ">=2.6.1"
 pyyaml = "*"
+# jaxlib = ">=0.7.0,<0.8"
+# jax = ">=0.7.0,<0.8"
+[pypi-dependencies]
+jax = {version = "*", extras = ["cuda12"]}

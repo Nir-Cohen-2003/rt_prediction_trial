@@ -7,14 +7,18 @@ and Butina clustering-based splits.
 
 import polars as pl
 import numpy as np
-from typing import Tuple
+# import torch
+from typing import Tuple, List, Optional
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 from rdkit.ML.Cluster import Butina
 from rdkit.Chem import rdFingerprintGenerator
 from collections import defaultdict
-
+import traceback
+import jax
+import jax.numpy as jnp
+import time
 
 def split_random(
     df: pl.DataFrame,
@@ -151,6 +155,135 @@ def split_scaffold(
     return train_df, val_df, test_df
 
 
+@jax.jit
+def _compute_tanimoto_block_jax(
+    fps_i: jnp.ndarray,
+    fps_j: jnp.ndarray,
+    counts_i: jnp.ndarray,
+    counts_j: jnp.ndarray
+) -> jnp.ndarray:
+    """
+    Compute Tanimoto similarity for a block of fingerprints using JAX.
+    
+    Tanimoto similarity = |A ∩ B| / |A ∪ B|
+                        = |A ∩ B| / (|A| + |B| - |A ∩ B|)
+    
+    Args:
+        fps_i: Boolean array of shape (n_i, fingerprint_length)
+        fps_j: Boolean array of shape (n_j, fingerprint_length)
+        counts_i: Bit counts for fps_i, shape (n_i,)
+        counts_j: Bit counts for fps_j, shape (n_j,)
+        
+    Returns:
+        Similarity matrix of shape (n_i, n_j)
+    """
+    # Compute intersection using bitwise AND
+    # Result shape: (n_i, n_j)
+    intersection = jnp.sum(
+        fps_i[:, None, :] & fps_j[None, :, :],
+        axis=2,
+        dtype=jnp.int32
+    )
+    
+    # Compute union: |A| + |B| - |A ∩ B|
+    union = counts_i[:, None] + counts_j[None, :] - intersection
+    
+    # Compute Tanimoto similarity, avoiding division by zero
+    similarity = jnp.where(
+        union > 0,
+        intersection / union,
+        0.0
+    )
+    
+    return similarity
+
+
+def _compute_tanimoto_distance_matrix_jax(
+    fingerprints: List,
+    batch_size: int = 1000
+) -> np.ndarray:
+    """
+    Compute pairwise Tanimoto distance matrix using JAX GPU acceleration.
+    Only computes upper triangle and stores results on CPU.
+    """
+    overall_start = time.time()
+    n = len(fingerprints)
+    
+    # Convert fingerprints to JAX arrays (as before)
+    conversion_start = time.time()
+    fp_arrays = []
+    for i, fp in enumerate(fingerprints):
+        if i % 1000 == 0 and i > 0:
+            print(f"Converting {i}/{n}...")
+        arr = np.zeros((len(fp),), dtype=np.uint8)
+        AllChem.DataStructs.ConvertToNumpyArray(fp, arr)
+        fp_arrays.append(arr.astype(bool))
+    
+    fp_np = np.stack(fp_arrays)
+    fps_jax = jnp.array(fp_np, dtype=jnp.bool_)
+    bit_counts = jnp.sum(fps_jax, axis=1, dtype=jnp.int32)
+    jax.block_until_ready(bit_counts)
+    
+    print(f"[split_butina] Computing distance matrix on GPU (storing results on CPU)...")
+    
+    # Allocate full distance matrix on CPU (NumPy)
+    dist_matrix_np = np.zeros((n, n), dtype=np.float32)
+    
+    computation_start = time.time()
+    blocks_computed = 0
+    total_blocks = sum(1 for i in range(0, n, batch_size) 
+                      for j in range(i, n, batch_size))
+    
+    # Only compute upper triangle (i <= j)
+    for i in range(0, n, batch_size):
+        i_end = min(i + batch_size, n)
+        batch_i = fps_jax[i:i_end]
+        batch_counts_i = bit_counts[i:i_end]
+        
+        # Start from i (not 0) to only compute upper triangle
+        for j in range(i, n, batch_size):
+            j_end = min(j + batch_size, n)
+            batch_j = fps_jax[j:j_end]
+            batch_counts_j = bit_counts[j:j_end]
+            
+            # Compute similarity block on GPU
+            sim_block = _compute_tanimoto_block_jax(
+                batch_i, batch_j, batch_counts_i, batch_counts_j
+            )
+            dist_block = 1.0 - sim_block
+            
+            # Transfer to CPU immediately
+            dist_block_cpu = np.array(dist_block)
+            
+            # Delete GPU arrays to free memory
+            del sim_block, dist_block
+            
+            # Store in upper triangle
+            dist_matrix_np[i:i_end, j:j_end] = dist_block_cpu
+            
+            # Mirror to lower triangle (if not on diagonal)
+            if i != j:
+                dist_matrix_np[j:j_end, i:i_end] = dist_block_cpu.T
+            
+            blocks_computed += 1
+            if blocks_computed % 10 == 0:
+                progress = int(100 * blocks_computed / total_blocks)
+                print(f"Progress: {progress}% ({blocks_computed}/{total_blocks})")
+    
+    print(f"[split_butina] Computation completed in {time.time() - computation_start:.2f}s")
+    
+    # Free all GPU memory
+    print(f"[split_butina] Freeing GPU resources...")
+    del fps_jax, bit_counts, fp_np
+    
+    # Force JAX to clear its device memory cache
+    jax.clear_backends()
+    
+    print(f"[split_butina] GPU resources freed")
+    
+    return dist_matrix_np
+
+
 def split_butina(
     df: pl.DataFrame,
     test_fraction: float,
@@ -159,7 +292,9 @@ def split_butina(
     inchi_column: str = "inchi",
     cutoff: float = 0.35,
     radius: int = 2,
-    nbits: int = 2048
+    nbits: int = 2048,
+    use_gpu: bool = True,
+    batch_size: int = 1000
 ) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """
     Butina clustering-based split using Morgan fingerprints.
@@ -177,6 +312,8 @@ def split_butina(
         cutoff: Tanimoto distance threshold for clustering (default 0.35)
         radius: Morgan fingerprint radius (default 2)
         nbits: Morgan fingerprint size (default 2048)
+        use_gpu: Whether to use GPU acceleration for distance matrix (default True)
+        batch_size: Batch size for GPU computation (default 1000)
     
     Returns:
         train_df, val_df, test_df
@@ -192,6 +329,11 @@ def split_butina(
     
     for idx, row in enumerate(df.iter_rows(named=True)):
         inchi = row[inchi_column]
+        
+        if inchi is None or inchi == "":
+            print(f"[Warning] Empty or null InChI at index {idx}, skipping")
+            continue
+        
         mol = Chem.MolFromInchi(inchi)
         
         if mol is None:
@@ -200,6 +342,9 @@ def split_butina(
         
         try:
             fp = morgan_gen.GetFingerprint(mol)
+            if fp is None:
+                print(f"[Warning] Failed to generate fingerprint at index {idx}, skipping")
+                continue
             fingerprints.append(fp)
             valid_indices.append(idx)
         except Exception as e:
@@ -210,15 +355,33 @@ def split_butina(
     df_valid = df[valid_indices]
     n = len(df_valid)
     
+    print(f"[split_butina] Successfully computed {n} fingerprints")
     print(f"[split_butina] Computing distance matrix for {n} molecules...")
     
     # Compute pairwise Tanimoto distances
-    distances = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            similarity = AllChem.DataStructs.TanimotoSimilarity(fingerprints[i], fingerprints[j])
-            distance = 1.0 - similarity
-            distances.append(distance)
+    if use_gpu:
+        print(f"[split_butina] Using JAX GPU-accelerated distance computation")
+        try:
+            distances = _compute_tanimoto_distance_matrix_jax(
+                fingerprints, 
+                batch_size=batch_size
+            )
+        except Exception as e:
+            print(f"[Error] JAX GPU computation failed: {e}")
+            traceback.print_exc()
+            print(f"[split_butina] Falling back to CPU computation")
+            use_gpu = False
+    
+    if not use_gpu:
+        print(f"[split_butina] Using CPU distance computation")
+        distances = []
+        for i in range(n):
+            if i % 100 == 0:
+                print(f"[split_butina] Progress: {int(100 * i / n)}%")
+            for j in range(i + 1, n):
+                similarity = AllChem.DataStructs.TanimotoSimilarity(fingerprints[i], fingerprints[j])
+                distance = 1.0 - similarity
+                distances.append(distance)
     
     print(f"[split_butina] Clustering with cutoff={cutoff}...")
     
@@ -266,23 +429,3 @@ def split_butina(
     print(f"[split_butina] Final split: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
     
     return train_df, val_df, test_df
-
-
-def split_custom(
-    df: pl.DataFrame,
-    splitter_fn,
-    **kwargs
-) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-    """
-    Custom split using a user-provided function.
-    
-    Args:
-        df: Input dataframe
-        splitter_fn: Function that takes df and returns (train_df, val_df, test_df)
-        **kwargs: Additional arguments for splitter_fn
-    
-    Returns:
-        train_df, val_df, test_df
-    """
-    print(f"[split_custom] Using custom splitter: {splitter_fn.__name__}")
-    return splitter_fn(df, **kwargs)

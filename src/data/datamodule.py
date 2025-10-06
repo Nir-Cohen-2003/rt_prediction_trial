@@ -18,7 +18,7 @@ import torch_geometric as pyg
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
 from .lmdb_dataset import LMDBGraphDataset
-from .dataset_splitting import split_random, split_scaffold, split_butina, split_custom
+from .dataset_splitting import split_random, split_scaffold, split_butina
 
 def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
     """
