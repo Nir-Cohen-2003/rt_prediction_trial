@@ -19,6 +19,7 @@ import traceback
 import jax
 import jax.numpy as jnp
 import time
+import gc
 
 def split_random(
     df: pl.DataFrame,
@@ -252,11 +253,8 @@ def _compute_tanimoto_distance_matrix_jax(
             )
             dist_block = 1.0 - sim_block
             
-            # Transfer to CPU immediately
-            dist_block_cpu = np.array(dist_block)
-            
-            # Delete GPU arrays to free memory
-            del sim_block, dist_block
+            # Force computation and transfer to CPU
+            dist_block_cpu = np.array(jax.block_until_ready(dist_block))
             
             # Store in upper triangle
             dist_matrix_np[i:i_end, j:j_end] = dist_block_cpu
@@ -272,12 +270,18 @@ def _compute_tanimoto_distance_matrix_jax(
     
     print(f"[split_butina] Computation completed in {time.time() - computation_start:.2f}s")
     
-    # Free all GPU memory
+    # Free GPU memory properly
     print(f"[split_butina] Freeing GPU resources...")
-    del fps_jax, bit_counts, fp_np
+    del fps_jax, bit_counts, fp_np, fp_arrays
     
-    # Force JAX to clear its device memory cache
+    # Clear JAX caches
     jax.clear_caches()
+    
+    # Force garbage collection
+    gc.collect()
+    
+    # Wait for JAX to finish all operations
+    jax.block_until_ready(jnp.array(0))
     
     print(f"[split_butina] GPU resources freed")
     
