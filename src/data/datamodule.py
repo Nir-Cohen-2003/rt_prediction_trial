@@ -110,9 +110,10 @@ class RTDataModule(L.LightningDataModule):
         self.val_dataset = None
         self.test_dataset = None
         
-        # Statistics for normalization
-        self.rt_mean: Optional[float] = None
-        self.rt_std: Optional[float] = None
+        # Statistics for normalization - NOT optional, must be set during setup
+        # Using sentinel values to detect if setup() was called
+        self.rt_mean: float = float('nan')
+        self.rt_std: float = float('nan')
         
         # Compute hash-based output directory
         self._compute_output_dir()
@@ -311,10 +312,30 @@ class RTDataModule(L.LightningDataModule):
         
         # Load statistics
         stats_path = self.output_dir / "stats.json"
+        if not stats_path.exists():
+            raise FileNotFoundError(
+                f"Statistics file not found at {stats_path}. "
+                f"Did prepare_data() run successfully?"
+            )
+        
         with open(stats_path, "r") as f:
             stats = json.load(f)
-        self.rt_mean = stats["rt_mean"]
-        self.rt_std = stats["rt_std"]
+        
+        # Validate that required statistics exist
+        if "rt_mean" not in stats or "rt_std" not in stats:
+            raise ValueError(
+                f"Statistics file {stats_path} is missing required fields 'rt_mean' or 'rt_std'"
+            )
+        
+        self.rt_mean = float(stats["rt_mean"])
+        self.rt_std = float(stats["rt_std"])
+        
+        # Validate statistics are valid numbers
+        if not (0 < self.rt_std < float('inf')):
+            raise ValueError(
+                f"Invalid RT standard deviation: {self.rt_std}. "
+                f"Must be a positive finite number."
+            )
         
         print(f"[RTDataModule] Loaded stats: RT mean={self.rt_mean:.2f}, std={self.rt_std:.2f}")
         
@@ -324,6 +345,12 @@ class RTDataModule(L.LightningDataModule):
             chemprop_train_path = self.output_dir / "train_chemprop.pkl"
             chemprop_val_path = self.output_dir / "val_chemprop.pkl"
             chemprop_test_path = self.output_dir / "test_chemprop.pkl"
+            
+            if not all(p.exists() for p in [chemprop_train_path, chemprop_val_path, chemprop_test_path]):
+                raise FileNotFoundError(
+                    f"Chemprop dataset files not found in {self.output_dir}. "
+                    f"Did prepare_data() run successfully?"
+                )
             
             with open(chemprop_train_path, "rb") as f:
                 self.train_dataset = pickle.load(f)
@@ -337,6 +364,12 @@ class RTDataModule(L.LightningDataModule):
             lmdb_train_path = self.output_dir / "train_graphs.lmdb"
             lmdb_val_path = self.output_dir / "val_graphs.lmdb"
             lmdb_test_path = self.output_dir / "test_graphs.lmdb"
+            
+            if not all(p.exists() for p in [lmdb_train_path, lmdb_val_path, lmdb_test_path]):
+                raise FileNotFoundError(
+                    f"LMDB dataset files not found in {self.output_dir}. "
+                    f"Did prepare_data() run successfully?"
+                )
             
             self.train_dataset = LMDBGraphDataset(str(lmdb_train_path), readonly=True)
             self.val_dataset = LMDBGraphDataset(str(lmdb_val_path), readonly=True)

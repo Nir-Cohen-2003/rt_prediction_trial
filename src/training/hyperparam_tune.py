@@ -16,6 +16,7 @@ from ..config import DataConfig, ModelConfig, TrainingConfig, ChemPropModelConfi
 from .trainer import RTTrainer
 from ..data.datamodule import RTDataModule
 from ..model.model import build_model
+from typing import Literal, cast
 
 
 def load_yaml_to_dataclass(path: Path | None, cls):
@@ -38,43 +39,6 @@ def load_yaml_to_dataclass(path: Path | None, cls):
         return cls(**data)
     except TypeError as e:
         raise ValueError(f"Failed to create {cls.__name__} from config file: {e}")
-
-
-def initialize_pyg_dimensions(data_cfg: DataConfig, model_cfg: ModelConfig):
-    """
-    Initialize PyG feature dimensions from featurizer.
-    This replicates the logic from Config.__post_init__.
-    """
-    if model_cfg.model_type != "pyg":
-        return
-    
-    # Create appropriate featurizer to get dimensions
-    if data_cfg.featurizer_type == "simple":
-        featurizer = SimpleMoleculeMolGraphFeaturizer(
-            atom_features=data_cfg.atom_features,
-            bond_features=data_cfg.bond_features,
-            atom_descriptors=data_cfg.atom_descriptors,
-            bond_descriptors=data_cfg.bond_descriptors
-        )
-    elif data_cfg.featurizer_type == "v1":
-        featurizer = MultiHotAtomFeaturizer.v1()
-    elif data_cfg.featurizer_type == "v2":
-        featurizer = MultiHotAtomFeaturizer.v2()
-    elif data_cfg.featurizer_type == "organic":
-        featurizer = MultiHotAtomFeaturizer.organic()
-    elif data_cfg.featurizer_type == "rigr":
-        featurizer = RIGRAtomFeaturizer()
-    else:
-        raise ValueError(f"Unknown featurizer_type: {data_cfg.featurizer_type}")
-    
-    # Set dimensions in PyG config
-    model_cfg.pyg.node_in_dim = len(featurizer)
-    if hasattr(featurizer, 'bond_fdim'):
-        model_cfg.pyg.edge_in_dim = featurizer.bond_fdim
-    
-    print(f"[initialize_pyg_dimensions] Set PyG feature dimensions: "
-          f"node_in_dim={model_cfg.pyg.node_in_dim}, edge_in_dim={model_cfg.pyg.edge_in_dim}")
-
 
 def safe_write_json(filepath: Path, data: dict, max_retries: int = 5):
     """Thread-safe JSON file writing with file locking."""
@@ -357,26 +321,30 @@ def build_objective(data_cfg: DataConfig,
                 dropout = base_model_cfg.dropout
             
             # Model-specific architecture parameters
+            # Type-safe handling with explicit type casting
+            aggregation: Literal["mean", "sum", "norm", "attentive"]
+            activation: Literal["relu", "silu", "gelu"]
+            
             if base_model_cfg.model_type == "chemprop":
                 if "aggregation_choices" in tuning_cfg:
-                    aggregation = trial.suggest_categorical(
-                        "aggregation",
-                        tuning_cfg["aggregation_choices"]
+                    aggregation = cast(
+                        Literal["mean", "sum", "norm", "attentive"],
+                        trial.suggest_categorical("aggregation", tuning_cfg["aggregation_choices"])
                     )
                 else:
+                    # No cast needed - base_model_cfg.chemprop.aggregation is already the correct type
                     aggregation = base_model_cfg.chemprop.aggregation
-                
-                activation = None  # Not used in Chemprop
+                activation = cast(Literal["relu", "silu", "gelu"], "relu")  # Dummy value, not used
             else:  # PyG model
                 if "activation_choices" in tuning_cfg:
-                    activation = trial.suggest_categorical(
-                        "activation",
-                        tuning_cfg["activation_choices"]
+                    activation = cast(
+                        Literal["relu", "silu", "gelu"],
+                        trial.suggest_categorical("activation", tuning_cfg["activation_choices"])
                     )
                 else:
+                    # No cast needed - base_model_cfg.pyg.activation is already the correct type
                     activation = base_model_cfg.pyg.activation
-                
-                aggregation = None  # Not used in PyG
+                aggregation = cast(Literal["mean", "sum", "norm", "attentive"], "mean")  # Dummy value, not used
             
             # ============================================================
             # TRAINING PARAMETERS
@@ -526,7 +494,7 @@ def build_objective(data_cfg: DataConfig,
                     pool_num_timesteps=base_model_cfg.pyg.pool_num_timesteps,
                     deepgcn=base_model_cfg.pyg.deepgcn,
                     gnn_type=base_model_cfg.pyg.gnn_type,
-                    activation=activation,  # Tuned parameter
+                    activation=activation,
                     num_heads=base_model_cfg.pyg.num_heads,
                     use_edge_features=base_model_cfg.pyg.use_edge_features
                 )
@@ -599,9 +567,12 @@ def build_objective(data_cfg: DataConfig,
                 num_workers = 0 if trials_per_gpu > 1 else 2
                 print(f"[Trial {trial.number}] Assigned to GPU {gpu_id} (expected {trials_per_gpu} trials/GPU)")
                 
-                # Override devices in config
-                config.training.devices = [gpu_id]
+                # Override devices in config - convert to integer for Lightning
+                config.training.devices = 1  # Use 1 device per trial
                 config.training.accelerator = "gpu"
+                
+                # Set CUDA_VISIBLE_DEVICES to control which GPU is used
+                os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
             else:
                 raise RuntimeError("No GPU available! This script requires GPU.")
             

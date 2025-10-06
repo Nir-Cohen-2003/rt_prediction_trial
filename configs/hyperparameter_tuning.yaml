@@ -4,7 +4,7 @@
 # Study configuration
 study_name: "deepgcn_lr_loss_tuning"
 direction: "minimize"
-trials: 3
+trials: 30
 n_jobs: 4
 seed: 42
 
@@ -24,7 +24,7 @@ lr_min: 0.00001
 lr_max: 0.01
 
 # Loss function - tuned
-loss_fn_choices: ["mse", "mae", "huber", "smooth_l1"]
+loss_fn_choices: ["mse", "mae", "huber"]
 
 # Huber delta for huber/smooth_l1 loss
 huber_delta_min: 0.5

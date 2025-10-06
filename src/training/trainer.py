@@ -7,7 +7,6 @@ from pathlib import Path
 import json
 import argparse
 import yaml
-import math
 from ..config import Config, DataConfig, ModelConfig, TrainingConfig
 
 from ..data.datamodule import RTDataModule
@@ -407,10 +406,23 @@ def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTD
     
     # Initialize trainer
     print("[train_from_config] Initializing trainer...")
+    
+    # Fix devices parameter - convert string to appropriate type
+    devices_param = config.training.devices
+    if isinstance(devices_param, str):
+        # Convert string like "0" or "0,1" to integer or list
+        if ',' in devices_param:
+            devices_param = [int(d.strip()) for d in devices_param.split(',')]
+        else:
+            try:
+                devices_param = int(devices_param)
+            except ValueError:
+                devices_param = 1  # Default to 1 device
+    
     trainer = L.Trainer(
         max_epochs=config.training.num_epochs,
         accelerator=config.training.accelerator,
-        devices=config.training.devices,
+        devices=devices_param,  # Use converted parameter
         precision=config.training.precision,
         callbacks=[checkpoint_callback, early_stop_callback, lr_monitor, grad_monitor],
         logger=logger,

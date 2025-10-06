@@ -109,7 +109,14 @@ class ChemPropModelConfig:
     """Configuration specific to Chemprop models."""
     
     aggregation: Literal["mean", "sum", "norm", "attentive"] = "mean"
+    use_chemeleon: bool = False
+    chemeleon_checkpoint: Optional[Path] = None
+    freeze_chemeleon: bool = False
 
+    def __post_init__(self):
+        # Normalize checkpoint path if provided
+        if self.chemeleon_checkpoint is not None:
+            self.chemeleon_checkpoint = Path(self.chemeleon_checkpoint)
 
 @dataclass
 class ModelConfig:
@@ -152,7 +159,7 @@ class TrainingConfig:
     weight_decay: float = 0.0
     
     # Loss function
-    loss_fn: Literal["mse", "mae", "huber", "smooth_l1"] = "mse"
+    loss_fn: Literal["mse", "mae", "huber"] = "mse"
     huber_delta: float = 1.0  # Delta parameter for Huber/Smooth L1 loss
     
     # Learning rate scheduling
@@ -177,7 +184,7 @@ class TrainingConfig:
     
     # Hardware
     accelerator: str = "auto"
-    devices: str = "auto"
+    devices: int | str | list[int] = "auto"  # Can be int, str, or list of ints
     precision: Literal["32", "16", "bf16"] = "32"
     
     # Reproducibility
