@@ -49,13 +49,9 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
             print(f"[build_chemprop_mpnn] Using config message_hidden_dim={message_hidden_dim}")
         
         # Infer number of layers
-        if cfg.chemeleon_num_layers is not None:
-            num_layers = cfg.chemeleon_num_layers
-            print(f"[build_chemprop_mpnn] Using config-specified num_layers={num_layers}")
-        else:
-            layer_keys = [k for k in state_dict.keys() if k.startswith('message_passing.') and '.W_i.' in k]
-            num_layers = len(layer_keys) if layer_keys else model_config.num_layers
-            print(f"[build_chemprop_mpnn] Inferred num_layers={num_layers} from checkpoint")
+        layer_keys = [k for k in state_dict.keys() if k.startswith('message_passing.') and '.W_i.' in k]
+        num_layers = len(layer_keys) if layer_keys else model_config.num_layers
+        print(f"[build_chemprop_mpnn] Inferred num_layers={num_layers} from checkpoint")
         
         # Build message passing with inferred/config dimensions
         message_passing = BondMessagePassing(
@@ -134,6 +130,7 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
         agg = NormAggregation()
     elif cfg.aggregation == "attentive":
         agg = AttentiveAggregation(
+            output_size=model_config.message_hidden_dim,
             input_dim=model_config.message_hidden_dim,
             hidden_dim=model_config.message_hidden_dim,
             dropout=model_config.dropout

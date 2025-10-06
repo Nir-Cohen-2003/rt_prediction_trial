@@ -12,7 +12,7 @@ from datetime import datetime
 import fcntl  # For file locking
 import time
 from dataclasses import asdict
-from ..config import DataConfig, ModelConfig, TrainingConfig, ChemPropModelConfig,PyGModelConfig
+from ..config import Config,DataConfig, ModelConfig, TrainingConfig, ChemPropModelConfig,PyGModelConfig
 from .trainer import RTTrainer
 from ..data.datamodule import RTDataModule
 from ..model.model import build_model
@@ -28,10 +28,8 @@ def load_yaml_to_dataclass(path: Path | None, cls):
     
     # Special handling for ModelConfig with nested configs
     if cls == ModelConfig and 'chemprop' in data and isinstance(data['chemprop'], dict):
-        from ..config import ChemPropModelConfig
         data['chemprop'] = ChemPropModelConfig(**data['chemprop'])
     elif cls == ModelConfig and 'pyg' in data and isinstance(data['pyg'], dict):
-        from ..config import PyGModelConfig
         data['pyg'] = PyGModelConfig(**data['pyg'])
     
     # Try to create instance directly from dict
@@ -539,7 +537,6 @@ def build_objective(data_cfg: DataConfig,
             # ============================================================
             # CREATE COMPLETE CONFIG - This triggers __post_init__!
             # ============================================================
-            from ..config import Config
             
             config = Config(
                 data=data_cfg,
@@ -564,8 +561,11 @@ def build_objective(data_cfg: DataConfig,
                 n_gpus = torch.cuda.device_count()
                 trials_per_gpu = max(1, n_jobs // n_gpus)
                 gpu_id = trial.number % n_gpus
-                num_workers = 0 if trials_per_gpu > 1 else 2
+                # Use 2 workers and prefetch factor of 4 for better data loading during tuning
+                num_workers = 2
+                prefetch_factor = 4
                 print(f"[Trial {trial.number}] Assigned to GPU {gpu_id} (expected {trials_per_gpu} trials/GPU)")
+                print(f"[Trial {trial.number}] Using {num_workers} workers with prefetch_factor={prefetch_factor}")
                 
                 # Override devices in config - convert to integer for Lightning
                 config.training.devices = 1  # Use 1 device per trial
@@ -579,14 +579,13 @@ def build_objective(data_cfg: DataConfig,
             # ============================================================
             # USE train_from_config - reuses all the initialization logic!
             # ============================================================
-            from .trainer import train_from_config
             
-            # Create datamodule
+            # Create datamodule with tuning-optimized settings
             datamodule = RTDataModule(
                 config=config.data,
                 model_type=config.model.model_type,
                 batch_size=batch_size,
-                num_workers=num_workers
+                num_workers=num_workers  # Use 2 workers for tuning
             )
             datamodule.prepare_data()
             datamodule.setup()
@@ -680,7 +679,6 @@ def main():
     base_training_cfg = load_yaml_to_dataclass(training_config_path, TrainingConfig)
     
     # Create a complete Config object to trigger __post_init__ and get correct dimensions
-    from ..config import Config
     base_config = Config(
         data=data_cfg,
         model=base_model_cfg,
@@ -800,7 +798,6 @@ def main():
                     save_all_trials_summary(study, run_dir)
                 except Exception as e:
                     print(f"[Trial {trial.number}] Error in callback: {e}")
-                    import traceback
                     traceback.print_exc()
             else:
                 print(f"[Trial {trial.number}] Warning: Trial marked complete but not in completed trials list")

@@ -42,13 +42,8 @@ class DataConfig:
     max_rt: Optional[float] = None
     
     # Molecule featurization - applies to BOTH Chemprop and PyG models
-    featurizer_type: Literal["simple", "v1", "v2", "organic", "rigr"] = "rigr"
-    
-    # SimpleMoleculeFeaturizer options (when featurizer_type="simple")
-    atom_features: bool = True
-    bond_features: bool = True
-    atom_descriptors: Optional[Literal["all", "rdkit_2d", "rdkit_2d_normalized"]] = None
-    bond_descriptors: Optional[Literal["all"]] = None
+    # Note: "rdkit" and "rdkit_deepgcn" are only valid for PyG models
+    featurizer_type: Literal["simple", "v1", "v2", "organic", "rigr", "rdkit", "rdkit_deepgcn"] = "rigr"
     
     def __post_init__(self):
         """Convert string paths to Path objects."""
@@ -215,33 +210,104 @@ class Config:
     tags: list[str] = field(default_factory=list)
     
     def __post_init__(self):
-        """Set PyG feature dimensions from featurizer configuration."""
+        """Validate featurizer and model type compatibility, set PyG feature dimensions."""
+        # Validate that rdkit and rdkit_deepgcn are only used with PyG models
+        if self.data.featurizer_type in ["rdkit", "rdkit_deepgcn"] and self.model.model_type != "pyg":
+            raise ValueError(
+                f"Featurizer '{self.data.featurizer_type}' can only be used with PyG models "
+                f"(model_type='pyg'), got model_type='{self.model.model_type}'"
+            )
+        
         if self.model.model_type == "pyg":
             # Import here to avoid circular dependency
+            from torch_geometric.utils import from_smiles
+            from .data.deepgcn_featurizer import get_node_dim, get_edge_dim
             
             # Create appropriate featurizer to get dimensions
-            if self.data.featurizer_type == "simple":
-                featurizer = SimpleMoleculeMolGraphFeaturizer(
-                    atom_features=self.data.atom_features,
-                    bond_features=self.data.bond_features,
-                    atom_descriptors=self.data.atom_descriptors,
-                    bond_descriptors=self.data.bond_descriptors
-                )
+            if self.data.featurizer_type == "rdkit":
+                # Use PyG's built-in from_smiles to get dimensions
+                # Test with a simple molecule
+                test_graph = from_smiles('C')
+                self.model.pyg.node_in_dim = test_graph.x.shape[1]
+                if test_graph.edge_attr is not None:
+                    self.model.pyg.edge_in_dim = test_graph.edge_attr.shape[1]
+                else:
+                    self.model.pyg.edge_in_dim = 0
+            
+            elif self.data.featurizer_type == "rdkit_deepgcn":
+                # Use DeepGCN featurizer dimensions
+                self.model.pyg.node_in_dim = get_node_dim()
+                self.model.pyg.edge_in_dim = get_edge_dim()
+            
+            elif self.data.featurizer_type == "simple":
+                # SimpleMoleculeMolGraphFeaturizer doesn't accept these arguments
+                # It uses default atom and bond featurizers internally
+                featurizer = SimpleMoleculeMolGraphFeaturizer()
+                try:
+                    self.model.pyg.node_in_dim = len(featurizer)  # type: ignore[arg-type]
+                except TypeError:
+                    if hasattr(featurizer, 'atom_fdim'):
+                        self.model.pyg.node_in_dim = featurizer.atom_fdim  # type: ignore[attr-defined]
+                    else:
+                        raise ValueError(f"Could not determine node feature dimension for featurizer: {type(featurizer)}")
+                
+                if hasattr(featurizer, 'bond_fdim'):
+                    self.model.pyg.edge_in_dim = featurizer.bond_fdim  # type: ignore[attr-defined]
+            
             elif self.data.featurizer_type == "v1":
-                featurizer = MultiHotAtomFeaturizer.v1()
+                featurizer = SimpleMoleculeMolGraphFeaturizer(atom_featurizer=MultiHotAtomFeaturizer.v1())
+                try:
+                    self.model.pyg.node_in_dim = len(featurizer)  # type: ignore[arg-type]
+                except TypeError:
+                    if hasattr(featurizer, 'atom_fdim'):
+                        self.model.pyg.node_in_dim = featurizer.atom_fdim  # type: ignore[attr-defined]
+                    else:
+                        raise ValueError(f"Could not determine node feature dimension for featurizer: {type(featurizer)}")
+                
+                if hasattr(featurizer, 'bond_fdim'):
+                    self.model.pyg.edge_in_dim = featurizer.bond_fdim  # type: ignore[attr-defined]
+            
             elif self.data.featurizer_type == "v2":
-                featurizer = MultiHotAtomFeaturizer.v2()
+                featurizer = SimpleMoleculeMolGraphFeaturizer(atom_featurizer=MultiHotAtomFeaturizer.v2())
+                try:
+                    self.model.pyg.node_in_dim = len(featurizer)  # type: ignore[arg-type]
+                except TypeError:
+                    if hasattr(featurizer, 'atom_fdim'):
+                        self.model.pyg.node_in_dim = featurizer.atom_fdim  # type: ignore[attr-defined]
+                    else:
+                        raise ValueError(f"Could not determine node feature dimension for featurizer: {type(featurizer)}")
+                
+                if hasattr(featurizer, 'bond_fdim'):
+                    self.model.pyg.edge_in_dim = featurizer.bond_fdim  # type: ignore[attr-defined]
+            
             elif self.data.featurizer_type == "organic":
-                featurizer = MultiHotAtomFeaturizer.organic()
+                featurizer = SimpleMoleculeMolGraphFeaturizer(atom_featurizer=MultiHotAtomFeaturizer.organic())
+                try:
+                    self.model.pyg.node_in_dim = len(featurizer)  # type: ignore[arg-type]
+                except TypeError:
+                    if hasattr(featurizer, 'atom_fdim'):
+                        self.model.pyg.node_in_dim = featurizer.atom_fdim  # type: ignore[attr-defined]
+                    else:
+                        raise ValueError(f"Could not determine node feature dimension for featurizer: {type(featurizer)}")
+                
+                if hasattr(featurizer, 'bond_fdim'):
+                    self.model.pyg.edge_in_dim = featurizer.bond_fdim  # type: ignore[attr-defined]
+            
             elif self.data.featurizer_type == "rigr":
-                featurizer = RIGRAtomFeaturizer()
+                featurizer = SimpleMoleculeMolGraphFeaturizer(atom_featurizer=RIGRAtomFeaturizer())
+                try:
+                    self.model.pyg.node_in_dim = len(featurizer)  # type: ignore[arg-type]
+                except TypeError:
+                    if hasattr(featurizer, 'atom_fdim'):
+                        self.model.pyg.node_in_dim = featurizer.atom_fdim  # type: ignore[attr-defined]
+                    else:
+                        raise ValueError(f"Could not determine node feature dimension for featurizer: {type(featurizer)}")
+                
+                if hasattr(featurizer, 'bond_fdim'):
+                    self.model.pyg.edge_in_dim = featurizer.bond_fdim  # type: ignore[attr-defined]
+            
             else:
                 raise ValueError(f"Unknown featurizer_type: {self.data.featurizer_type}")
-            
-            # Set dimensions in PyG config
-            self.model.pyg.node_in_dim = len(featurizer)
-            if hasattr(featurizer, 'bond_fdim'):
-                self.model.pyg.edge_in_dim = featurizer.bond_fdim
             
             print(f"[Config] Set PyG feature dimensions: node_in_dim={self.model.pyg.node_in_dim}, "
                   f"edge_in_dim={self.model.pyg.edge_in_dim}")

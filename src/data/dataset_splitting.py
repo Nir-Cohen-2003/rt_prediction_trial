@@ -277,7 +277,7 @@ def _compute_tanimoto_distance_matrix_jax(
     del fps_jax, bit_counts, fp_np
     
     # Force JAX to clear its device memory cache
-    jax.clear_backends()
+    jax.clear_caches()
     
     print(f"[split_butina] GPU resources freed")
     

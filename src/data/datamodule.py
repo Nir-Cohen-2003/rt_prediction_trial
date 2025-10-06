@@ -17,8 +17,10 @@ import torch
 import torch_geometric as pyg
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
+from torch_geometric.utils import from_smiles
 from .lmdb_dataset import LMDBGraphDataset
 from .dataset_splitting import split_random, split_scaffold, split_butina
+from .deepgcn_featurizer import get_node_features, get_edge_features
 
 def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
     """
@@ -72,8 +74,9 @@ class RTDataModule(L.LightningDataModule):
     Handles data loading, preprocessing, splitting, and batching.
     Supports both Chemprop and custom GNN models with configurable featurizers.
     
-    Processed data is saved in data/processed/<hash> where hash is computed
-    from the DataConfig to ensure reproducibility and reuse.
+    Data splitting is cached separately from graph featurization:
+    - Split data saved in data/processed/<split_hash>/
+    - Featurized graphs saved in data/processed/<split_hash>/graphs_<featurizer>_<model_type>/
     """
     
     def __init__(
@@ -115,21 +118,22 @@ class RTDataModule(L.LightningDataModule):
         self.rt_mean: float = float('nan')
         self.rt_std: float = float('nan')
         
-        # Compute hash-based output directory
-        self._compute_output_dir()
+        # Compute hash-based output directories
+        self._compute_output_dirs()
         
-        print(f"[RTDataModule] Initialized with output_dir: {self.output_dir}")
+        print(f"[RTDataModule] Split data dir: {self.split_dir}")
+        print(f"[RTDataModule] Graph data dir: {self.graph_dir}")
         print(f"[RTDataModule] Using featurizer: {self.config.featurizer_type}")
     
     def _create_featurizer(self):
         """Create the appropriate featurizer based on config."""
-        if self.config.featurizer_type == "simple":
-            return SimpleMoleculeMolGraphFeaturizer(
-                atom_features=self.config.atom_features,
-                bond_features=self.config.bond_features,
-                atom_descriptors=self.config.atom_descriptors,
-                bond_descriptors=self.config.bond_descriptors
-            )
+        if self.config.featurizer_type in ["rdkit", "rdkit_deepgcn"]:
+            # These are handled directly in _polars_to_pyg, not via Chemprop
+            return None
+        elif self.config.featurizer_type == "simple":
+            # SimpleMoleculeMolGraphFeaturizer doesn't accept these parameters
+            # It uses default atom and bond featurizers
+            return SimpleMoleculeMolGraphFeaturizer()
         elif self.config.featurizer_type == "v1":
             return SimpleMoleculeMolGraphFeaturizer(atom_featurizer=MultiHotAtomFeaturizer.v1())
         elif self.config.featurizer_type == "v2":
@@ -140,77 +144,107 @@ class RTDataModule(L.LightningDataModule):
             return SimpleMoleculeMolGraphFeaturizer(atom_featurizer=RIGRAtomFeaturizer())
         else:
             raise ValueError(f"Unknown featurizer_type: {self.config.featurizer_type}. "
-                           f"Must be one of: 'simple', 'v1', 'v2', 'organic', 'rigr'")
+                           f"Must be one of: 'simple', 'v1', 'v2', 'organic', 'rigr', 'rdkit', 'rdkit_deepgcn'")
     
-    def _compute_output_dir(self):
+    def _compute_output_dirs(self):
         """
-        Compute output directory based on hash of DataConfig.
-        This ensures that identical configs reuse the same processed data.
+        Compute output directories:
+        1. Split directory based on data config (excluding featurizer)
+        2. Graph directory includes split + featurizer + model_type
         """
-        # Create fingerprint from relevant config fields
-        # Convert config to dict, excluding output_dir itself to avoid circular dependency
-        config_dict = asdict(self.config)
+        # Create fingerprint for SPLITTING only (exclude featurizer)
+        split_config = {
+            'raw_data_path': str(self.config.raw_data_path),
+            'cid_column': self.config.cid_column,
+            'rt_column': self.config.rt_column,
+            'inchi_column': self.config.inchi_column,
+            'split_method': self.config.split_method,
+            'test_fraction': self.config.test_fraction,
+            'val_fraction': self.config.val_fraction,
+            'random_seed': self.config.random_seed,
+            'butina_cutoff': self.config.butina_cutoff,
+            'butina_radius': self.config.butina_radius,
+            'butina_nbits': self.config.butina_nbits,
+            'remove_duplicates': self.config.remove_duplicates,
+            'filter_invalid_inchi': self.config.filter_invalid_inchi,
+            'min_rt': self.config.min_rt,
+            'max_rt': self.config.max_rt,
+        }
         
-        # Remove output_dir from hash computation
-        config_dict.pop('output_dir', None)
-        config_dict.pop('train_file', None)
-        config_dict.pop('val_file', None)
-        config_dict.pop('test_file', None)
+        # Hash for split directory
+        split_str = json.dumps(split_config, sort_keys=True, default=str)
+        split_hash = hashlib.sha256(split_str.encode()).hexdigest()[:16]
         
-        # Serialize and hash
-        config_str = json.dumps(config_dict, sort_keys=True, default=str)
-        config_hash = hashlib.sha256(config_str.encode()).hexdigest()[:16]
-        
-        # Set output directory to data/processed/<hash>
+        # Base directory for this split
         base_dir = Path("data/processed")
-        self.output_dir = base_dir / config_hash
+        self.split_dir = base_dir / split_hash
         
-        print(f"[RTDataModule] Config hash: {config_hash}")
+        # Graph directory includes featurizer and model type
+        graph_suffix = f"graphs_{self.config.featurizer_type}_{self.model_type}"
+        self.graph_dir = self.split_dir / graph_suffix
+        
+        print(f"[RTDataModule] Split hash: {split_hash}")
+        print(f"[RTDataModule] Graph suffix: {graph_suffix}")
     
     def prepare_data(self):
         """
         Download and prepare data (runs once on main process).
-        Here we load, preprocess, split, and save the data.
-        Creates BOTH Chemprop and PyG datasets for flexibility.
+        Step 1: Load, preprocess, and split data (cached in split_dir)
+        Step 2: Create featurized graphs (cached in graph_dir)
         """
         print("[RTDataModule] prepare_data: START")
         
-        # Create output directory
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # ========== STEP 1: Split Data ==========
+        self._prepare_splits()
         
-        # Save the config used for this processing
-        config_path = self.output_dir / "data_config.json"
-        if not config_path.exists():
-            with open(config_path, "w") as f:
-                json.dump(asdict(self.config), f, indent=2, default=str)
-            print(f"[RTDataModule] Saved data config to {config_path}")
+        # ========== STEP 2: Featurize Graphs ==========
+        self._prepare_graphs()
         
-        # Check if already processed
-        train_path = self.output_dir / self.config.train_file
-        stats_path = self.output_dir / "stats.json"
+        print(f"[RTDataModule] prepare_data: END")
+    
+    def _prepare_splits(self):
+        """Prepare data splits (independent of featurization)."""
+        print("[RTDataModule] Step 1: Preparing splits...")
         
-        # Paths for both dataset types
-        chemprop_train_path = self.output_dir / "train_chemprop.pkl"
-        chemprop_val_path = self.output_dir / "val_chemprop.pkl"
-        chemprop_test_path = self.output_dir / "test_chemprop.pkl"
-        lmdb_train_path = self.output_dir / "train_graphs.lmdb"
-        lmdb_val_path = self.output_dir / "val_graphs.lmdb"
-        lmdb_test_path = self.output_dir / "test_graphs.lmdb"
+        # Create split directory
+        self.split_dir.mkdir(parents=True, exist_ok=True)
         
-        # Check if all datasets exist
-        all_paths_exist = (
-            train_path.exists() and 
-            stats_path.exists() and
-            all(p.exists() for p in [chemprop_train_path, chemprop_val_path, chemprop_test_path]) and
-            all(p.exists() for p in [lmdb_train_path, lmdb_val_path, lmdb_test_path])
-        )
+        # Save the split config
+        split_config_path = self.split_dir / "split_config.json"
+        if not split_config_path.exists():
+            split_config = {
+                'raw_data_path': str(self.config.raw_data_path),
+                'cid_column': self.config.cid_column,
+                'rt_column': self.config.rt_column,
+                'inchi_column': self.config.inchi_column,
+                'split_method': self.config.split_method,
+                'test_fraction': self.config.test_fraction,
+                'val_fraction': self.config.val_fraction,
+                'random_seed': self.config.random_seed,
+                'butina_cutoff': self.config.butina_cutoff,
+                'butina_radius': self.config.butina_radius,
+                'butina_nbits': self.config.butina_nbits,
+                'remove_duplicates': self.config.remove_duplicates,
+                'filter_invalid_inchi': self.config.filter_invalid_inchi,
+                'min_rt': self.config.min_rt,
+                'max_rt': self.config.max_rt,
+            }
+            with open(split_config_path, "w") as f:
+                json.dump(split_config, f, indent=2, default=str)
+            print(f"[RTDataModule] Saved split config to {split_config_path}")
         
-        if all_paths_exist and not self.force_rebuild:
-            print(f"[RTDataModule] All processed data already exists in {self.output_dir}, skipping.")
+        # Check if splits already exist
+        train_path = self.split_dir / self.config.train_file
+        val_path = self.split_dir / self.config.val_file
+        test_path = self.split_dir / self.config.test_file
+        stats_path = self.split_dir / "stats.json"
+        
+        if all(p.exists() for p in [train_path, val_path, test_path, stats_path]) and not self.force_rebuild:
+            print(f"[RTDataModule] Splits already exist in {self.split_dir}, skipping.")
             return
         
         if self.force_rebuild:
-            print("[RTDataModule] force_rebuild=True, reprocessing data...")
+            print("[RTDataModule] force_rebuild=True, reprocessing splits...")
         
         # Load raw data
         print(f"[RTDataModule] Loading raw data from {self.config.raw_data_path}")
@@ -249,15 +283,15 @@ class RTDataModule(L.LightningDataModule):
         elif self.config.split_method == "custom":
             if self.custom_splitter is None:
                 raise ValueError("custom_splitter must be provided for 'custom' split_method")
-            train_df, val_df, test_df = split_custom(df, self.custom_splitter)
+            train_df, val_df, test_df = self.custom_splitter(df)
         else:
             raise ValueError(f"Unknown split_method: {self.config.split_method}")
         
         # Save splits
-        print(f"[RTDataModule] Saving splits to {self.output_dir}...")
-        train_df.write_parquet(self.output_dir / self.config.train_file)
-        val_df.write_parquet(self.output_dir / self.config.val_file)
-        test_df.write_parquet(self.output_dir / self.config.test_file)
+        print(f"[RTDataModule] Saving splits to {self.split_dir}...")
+        train_df.write_parquet(train_path)
+        val_df.write_parquet(val_path)
+        test_df.write_parquet(test_path)
         
         # Compute and save statistics
         stats = {
@@ -273,35 +307,90 @@ class RTDataModule(L.LightningDataModule):
         with open(stats_path, "w") as f:
             json.dump(stats, f, indent=2)
         
+        print(f"[RTDataModule] Splits saved: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
+    
+    def _prepare_graphs(self):
+        """Prepare featurized graphs for the current featurizer and model type."""
+        print(f"[RTDataModule] Step 2: Preparing graphs (featurizer={self.config.featurizer_type}, model={self.model_type})...")
+        
+        # Create graph directory
+        self.graph_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save graph config
+        graph_config_path = self.graph_dir / "graph_config.json"
+        if not graph_config_path.exists():
+            graph_config = {
+                'featurizer_type': self.config.featurizer_type,
+                'model_type': self.model_type,
+            }
+            with open(graph_config_path, "w") as f:
+                json.dump(graph_config, f, indent=2)
+            print(f"[RTDataModule] Saved graph config to {graph_config_path}")
+        
+        # Load statistics
+        stats_path = self.split_dir / "stats.json"
+        with open(stats_path, "r") as f:
+            stats = json.load(f)
         rt_mean = stats["rt_mean"]
         rt_std = stats["rt_std"]
         
-        # Create and save BOTH dataset types for flexibility
-        print("[RTDataModule] Creating and saving Chemprop datasets...")
-        train_chemprop = self._polars_to_chemprop(train_df, rt_mean, rt_std)
-        val_chemprop = self._polars_to_chemprop(val_df, rt_mean, rt_std)
-        test_chemprop = self._polars_to_chemprop(test_df, rt_mean, rt_std)
+        # Paths for datasets
+        if self.model_type == "chemprop":
+            train_path = self.graph_dir / "train_chemprop.pkl"
+            val_path = self.graph_dir / "val_chemprop.pkl"
+            test_path = self.graph_dir / "test_chemprop.pkl"
+            
+            if all(p.exists() for p in [train_path, val_path, test_path]) and not self.force_rebuild:
+                print(f"[RTDataModule] Chemprop graphs already exist in {self.graph_dir}, skipping.")
+                return
+            
+            # Load split dataframes
+            train_df = pl.read_parquet(self.split_dir / self.config.train_file)
+            val_df = pl.read_parquet(self.split_dir / self.config.val_file)
+            test_df = pl.read_parquet(self.split_dir / self.config.test_file)
+            
+            # Create Chemprop datasets
+            print("[RTDataModule] Creating Chemprop datasets...")
+            train_dataset = self._polars_to_chemprop(train_df, rt_mean, rt_std)
+            val_dataset = self._polars_to_chemprop(val_df, rt_mean, rt_std)
+            test_dataset = self._polars_to_chemprop(test_df, rt_mean, rt_std)
+            
+            # Save
+            with open(train_path, "wb") as f:
+                pickle.dump(train_dataset, f)
+            with open(val_path, "wb") as f:
+                pickle.dump(val_dataset, f)
+            with open(test_path, "wb") as f:
+                pickle.dump(test_dataset, f)
+            
+            print(f"[RTDataModule] Saved Chemprop datasets: {len(train_dataset)} train, {len(val_dataset)} val, {len(test_dataset)} test")
         
-        with open(chemprop_train_path, "wb") as f:
-            pickle.dump(train_chemprop, f)
-        with open(chemprop_val_path, "wb") as f:
-            pickle.dump(val_chemprop, f)
-        with open(chemprop_test_path, "wb") as f:
-            pickle.dump(test_chemprop, f)
-        print(f"[RTDataModule] Saved Chemprop datasets: {len(train_chemprop)} train, {len(val_chemprop)} val, {len(test_chemprop)} test")
-        
-        print("[RTDataModule] Creating and saving PyG graphs to LMDB...")
-        train_pyg = self._polars_to_pyg(train_df, rt_mean, rt_std)
-        val_pyg = self._polars_to_pyg(val_df, rt_mean, rt_std)
-        test_pyg = self._polars_to_pyg(test_df, rt_mean, rt_std)
-        
-        # Save to LMDB
-        LMDBGraphDataset.from_graphs(train_pyg, str(lmdb_train_path))
-        LMDBGraphDataset.from_graphs(val_pyg, str(lmdb_val_path))
-        LMDBGraphDataset.from_graphs(test_pyg, str(lmdb_test_path))
-        print(f"[RTDataModule] Saved PyG LMDB datasets: {len(train_pyg)} train, {len(val_pyg)} val, {len(test_pyg)} test")
-
-        print(f"[RTDataModule] prepare_data: END - saved both dataset types to {self.output_dir}")
+        else:  # PyG
+            train_path = self.graph_dir / "train_graphs.lmdb"
+            val_path = self.graph_dir / "val_graphs.lmdb"
+            test_path = self.graph_dir / "test_graphs.lmdb"
+            
+            if all(p.exists() for p in [train_path, val_path, test_path]) and not self.force_rebuild:
+                print(f"[RTDataModule] PyG graphs already exist in {self.graph_dir}, skipping.")
+                return
+            
+            # Load split dataframes
+            train_df = pl.read_parquet(self.split_dir / self.config.train_file)
+            val_df = pl.read_parquet(self.split_dir / self.config.val_file)
+            test_df = pl.read_parquet(self.split_dir / self.config.test_file)
+            
+            # Create PyG datasets
+            print("[RTDataModule] Creating PyG datasets...")
+            train_graphs = self._polars_to_pyg(train_df, rt_mean, rt_std)
+            val_graphs = self._polars_to_pyg(val_df, rt_mean, rt_std)
+            test_graphs = self._polars_to_pyg(test_df, rt_mean, rt_std)
+            
+            # Save to LMDB
+            LMDBGraphDataset.from_graphs(train_graphs, str(train_path))
+            LMDBGraphDataset.from_graphs(val_graphs, str(val_path))
+            LMDBGraphDataset.from_graphs(test_graphs, str(test_path))
+            
+            print(f"[RTDataModule] Saved PyG LMDB datasets: {len(train_graphs)} train, {len(val_graphs)} val, {len(test_graphs)} test")
     
     def setup(self, stage: Optional[str] = None):
         """
@@ -311,7 +400,7 @@ class RTDataModule(L.LightningDataModule):
         print(f"[RTDataModule] setup: stage={stage}")
         
         # Load statistics
-        stats_path = self.output_dir / "stats.json"
+        stats_path = self.split_dir / "stats.json"
         if not stats_path.exists():
             raise FileNotFoundError(
                 f"Statistics file not found at {stats_path}. "
@@ -342,38 +431,38 @@ class RTDataModule(L.LightningDataModule):
         if self.model_type == "chemprop":
             # Load pre-saved Chemprop datasets
             print("[RTDataModule] Loading pre-saved Chemprop datasets...")
-            chemprop_train_path = self.output_dir / "train_chemprop.pkl"
-            chemprop_val_path = self.output_dir / "val_chemprop.pkl"
-            chemprop_test_path = self.output_dir / "test_chemprop.pkl"
+            train_path = self.graph_dir / "train_chemprop.pkl"
+            val_path = self.graph_dir / "val_chemprop.pkl"
+            test_path = self.graph_dir / "test_chemprop.pkl"
             
-            if not all(p.exists() for p in [chemprop_train_path, chemprop_val_path, chemprop_test_path]):
+            if not all(p.exists() for p in [train_path, val_path, test_path]):
                 raise FileNotFoundError(
-                    f"Chemprop dataset files not found in {self.output_dir}. "
+                    f"Chemprop dataset files not found in {self.graph_dir}. "
                     f"Did prepare_data() run successfully?"
                 )
             
-            with open(chemprop_train_path, "rb") as f:
+            with open(train_path, "rb") as f:
                 self.train_dataset = pickle.load(f)
-            with open(chemprop_val_path, "rb") as f:
+            with open(val_path, "rb") as f:
                 self.val_dataset = pickle.load(f)
-            with open(chemprop_test_path, "rb") as f:
+            with open(test_path, "rb") as f:
                 self.test_dataset = pickle.load(f)
         else:
             # Load LMDB datasets for custom GNN
             print("[RTDataModule] Loading LMDB graph datasets...")
-            lmdb_train_path = self.output_dir / "train_graphs.lmdb"
-            lmdb_val_path = self.output_dir / "val_graphs.lmdb"
-            lmdb_test_path = self.output_dir / "test_graphs.lmdb"
+            train_path = self.graph_dir / "train_graphs.lmdb"
+            val_path = self.graph_dir / "val_graphs.lmdb"
+            test_path = self.graph_dir / "test_graphs.lmdb"
             
-            if not all(p.exists() for p in [lmdb_train_path, lmdb_val_path, lmdb_test_path]):
+            if not all(p.exists() for p in [train_path, val_path, test_path]):
                 raise FileNotFoundError(
-                    f"LMDB dataset files not found in {self.output_dir}. "
+                    f"LMDB dataset files not found in {self.graph_dir}. "
                     f"Did prepare_data() run successfully?"
                 )
             
-            self.train_dataset = LMDBGraphDataset(str(lmdb_train_path), readonly=True)
-            self.val_dataset = LMDBGraphDataset(str(lmdb_val_path), readonly=True)
-            self.test_dataset = LMDBGraphDataset(str(lmdb_test_path), readonly=True)
+            self.train_dataset = LMDBGraphDataset(str(train_path), readonly=True)
+            self.val_dataset = LMDBGraphDataset(str(val_path), readonly=True)
+            self.test_dataset = LMDBGraphDataset(str(test_path), readonly=True)
         
         print(f"[RTDataModule] setup: train={len(self.train_dataset)}, "
               f"val={len(self.val_dataset)}, test={len(self.test_dataset)}")
@@ -405,8 +494,8 @@ class RTDataModule(L.LightningDataModule):
                 skipped += 1
                 continue
             
-            # Create datapoint - featurizer will be applied by Chemprop during batching
-            datapoint = MoleculeDatapoint(mol, [rt_norm])
+            # Create datapoint - MoleculeDatapoint expects numpy array for targets
+            datapoint = MoleculeDatapoint(mol, np.array([rt_norm]))
             datapoints.append(datapoint)
         
         if skipped > 0:
@@ -415,7 +504,7 @@ class RTDataModule(L.LightningDataModule):
         return MoleculeDataset(datapoints, featurizer=self.featurizer)
     
     def _polars_to_pyg(self, df, rt_mean: float, rt_std: float):
-        """Convert Polars DataFrame to PyG dataset using Chemprop featurizer."""
+        """Convert Polars DataFrame to PyG dataset using configured featurizer."""
         graphs = []
         skipped = 0
         
@@ -441,28 +530,78 @@ class RTDataModule(L.LightningDataModule):
                 skipped += 1
                 continue
             
-            # Get features from Chemprop featurizer
-            molgraph = self.featurizer(mol)
+            # Create graph based on featurizer type
+            try:
+                if self.config.featurizer_type == "rdkit":
+                    # Use PyG's built-in from_smiles
+                    smiles = Chem.MolToSmiles(mol)
+                    graph = from_smiles(smiles)
+                    if graph is None:
+                        skipped += 1
+                        continue
+                    # Add y label
+                    graph.y = torch.tensor([rt_norm], dtype=torch.float)
+                
+                elif self.config.featurizer_type == "rdkit_deepgcn":
+                    # Use DeepGCN featurizer
+                    x = torch.from_numpy(get_node_features(mol)).float()
+                    
+                    # Build edge_index and edge_attr
+                    if len(mol.GetBonds()) > 0:
+                        edges_list = []
+                        edge_features_list = []
+                        edge_feat_array = get_edge_features(mol)
+                        
+                        for idx, bond in enumerate(mol.GetBonds()):
+                            i = bond.GetBeginAtomIdx()
+                            j = bond.GetEndAtomIdx()
+                            # Add edges in both directions
+                            edges_list.append((i, j))
+                            edge_features_list.append(edge_feat_array[idx])
+                            edges_list.append((j, i))
+                            edge_features_list.append(edge_feat_array[idx])
+                        
+                        edge_index = torch.tensor(edges_list, dtype=torch.long).t().contiguous()
+                        edge_attr = torch.from_numpy(np.array(edge_features_list, dtype=np.float32))
+                    else:
+                        edge_index = torch.empty((2, 0), dtype=torch.long)
+                        edge_attr = None
+                    
+                    graph = Data(
+                        x=x,
+                        edge_index=edge_index,
+                        edge_attr=edge_attr,
+                        y=torch.tensor([rt_norm], dtype=torch.float)
+                    )
+                
+                else:
+                    # Use Chemprop featurizer
+                    molgraph = self.featurizer(mol)
+                    
+                    # Extract graph structure using correct MolGraph attributes
+                    x = torch.tensor(molgraph.V, dtype=torch.float)
+                    edge_index = torch.from_numpy(molgraph.edge_index)
+                    
+                    # Handle edge attributes if present
+                    if molgraph.E is not None:
+                        edge_attr = torch.tensor(molgraph.E, dtype=torch.float)
+                    else:
+                        edge_attr = None
+                    
+                    # Create Data object
+                    graph = Data(
+                        x=x,
+                        edge_index=edge_index,
+                        edge_attr=edge_attr,
+                        y=torch.tensor([rt_norm], dtype=torch.float)
+                    )
+                
+                graphs.append(graph)
             
-            # Extract graph structure using correct MolGraph attributes
-            # MolGraph has: V (node features), E (edge features), edge_index
-            x = torch.tensor(molgraph.V, dtype=torch.float)
-            edge_index = torch.from_numpy(molgraph.edge_index)
-            
-            # Handle edge attributes if present
-            if molgraph.E is not None:
-                edge_attr = torch.tensor(molgraph.E, dtype=torch.float)
-            else:
-                edge_attr = None
-            
-            # Create Data object
-            graph = Data(
-                x=x,
-                edge_index=edge_index,
-                edge_attr=edge_attr,
-                y=torch.tensor([rt_norm], dtype=torch.float)
-            )
-            graphs.append(graph)
+            except Exception as e:
+                print(f"[Warning] Failed to create graph: {e}")
+                skipped += 1
+                continue
         
         if skipped > 0:
             print(f"[Warning] Skipped {skipped} invalid InChI structures when creating PyG graphs")
