@@ -12,6 +12,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 from rdkit.ML.Cluster import Butina
+from rdkit.Chem import rdFingerprintGenerator
 from collections import defaultdict
 
 
@@ -182,6 +183,9 @@ def split_butina(
     """
     print(f"[split_butina] Computing Morgan fingerprints (radius={radius}, nbits={nbits})...")
     
+    # Create Morgan fingerprint generator
+    morgan_gen = rdFingerprintGenerator.GetMorganGenerator(radius=radius, fpSize=nbits)
+    
     # Compute Morgan fingerprints
     fingerprints = []
     valid_indices = []
@@ -195,7 +199,7 @@ def split_butina(
             continue
         
         try:
-            fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=nbits)
+            fp = morgan_gen.GetFingerprint(mol)
             fingerprints.append(fp)
             valid_indices.append(idx)
         except Exception as e:
