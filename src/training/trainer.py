@@ -61,7 +61,7 @@ class CosineAnnealingWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
                     for base_lr in self.base_lrs]
 
 
-class ChempropRTModule(L.LightningModule):
+class RTTrainer(L.LightningModule):
     """
     Lightning module wrapping models for RT prediction.
     
@@ -361,7 +361,7 @@ def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTD
     model = build_model(config.model)
     
     # Wrap in Lightning module
-    module = ChempropRTModule(
+    module = RTTrainer(
         model=model,
         model_type=config.model.model_type,
         training_config=config.training,

@@ -455,7 +455,7 @@ class RTDataModule(L.LightningDataModule):
                 num_workers=self.num_workers,
                 shuffle=True,
                 pin_memory=True,
-                prefetch_factor=4,
+                prefetch_factor=4 if self.num_workers > 0 else None,
                 persistent_workers=self.num_workers > 0,
             )
     
@@ -477,7 +477,7 @@ class RTDataModule(L.LightningDataModule):
                 num_workers=self.num_workers,
                 shuffle=False,
                 pin_memory=True,
-                prefetch_factor=4,
+                prefetch_factor=4 if self.num_workers > 0 else None,
                 persistent_workers=self.num_workers > 0,
             )
     
@@ -499,6 +499,6 @@ class RTDataModule(L.LightningDataModule):
                 num_workers=self.num_workers,
                 shuffle=False,
                 pin_memory=True,
-                prefetch_factor=4,
+                prefetch_factor=4 if self.num_workers > 0 else None,
                 persistent_workers=self.num_workers > 0,
             )
