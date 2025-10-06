@@ -13,7 +13,7 @@ import fcntl  # For file locking
 import time
 from dataclasses import asdict
 from ..config import DataConfig, ModelConfig, TrainingConfig, ChemPropModelConfig,PyGModelConfig
-from .trainer import ChempropRTModule
+from .trainer import RTTrainer
 from ..data.datamodule import RTDataModule
 from ..model.model import build_model
 
@@ -38,6 +38,42 @@ def load_yaml_to_dataclass(path: Path | None, cls):
         return cls(**data)
     except TypeError as e:
         raise ValueError(f"Failed to create {cls.__name__} from config file: {e}")
+
+
+def initialize_pyg_dimensions(data_cfg: DataConfig, model_cfg: ModelConfig):
+    """
+    Initialize PyG feature dimensions from featurizer.
+    This replicates the logic from Config.__post_init__.
+    """
+    if model_cfg.model_type != "pyg":
+        return
+    
+    # Create appropriate featurizer to get dimensions
+    if data_cfg.featurizer_type == "simple":
+        featurizer = SimpleMoleculeMolGraphFeaturizer(
+            atom_features=data_cfg.atom_features,
+            bond_features=data_cfg.bond_features,
+            atom_descriptors=data_cfg.atom_descriptors,
+            bond_descriptors=data_cfg.bond_descriptors
+        )
+    elif data_cfg.featurizer_type == "v1":
+        featurizer = MultiHotAtomFeaturizer.v1()
+    elif data_cfg.featurizer_type == "v2":
+        featurizer = MultiHotAtomFeaturizer.v2()
+    elif data_cfg.featurizer_type == "organic":
+        featurizer = MultiHotAtomFeaturizer.organic()
+    elif data_cfg.featurizer_type == "rigr":
+        featurizer = RIGRAtomFeaturizer()
+    else:
+        raise ValueError(f"Unknown featurizer_type: {data_cfg.featurizer_type}")
+    
+    # Set dimensions in PyG config
+    model_cfg.pyg.node_in_dim = len(featurizer)
+    if hasattr(featurizer, 'bond_fdim'):
+        model_cfg.pyg.edge_in_dim = featurizer.bond_fdim
+    
+    print(f"[initialize_pyg_dimensions] Set PyG feature dimensions: "
+          f"node_in_dim={model_cfg.pyg.node_in_dim}, edge_in_dim={model_cfg.pyg.edge_in_dim}")
 
 
 def safe_write_json(filepath: Path, data: dict, max_retries: int = 5):
@@ -264,167 +300,208 @@ def save_all_trials_summary(study: optuna.Study, output_dir: Path):
 
 def build_objective(data_cfg: DataConfig,
                     base_model_cfg: ModelConfig,
+                    base_training_cfg: TrainingConfig,
                     tuning_cfg: dict,
                     output_dir: Path,
                     study: optuna.Study):
     """Build the objective function for Optuna optimization."""
     
-    # Check if using CheMeleon
-    is_chemeleon = base_model_cfg.model_type == "chemprop" and base_model_cfg.chemprop.use_chemeleon
-    
     def objective(trial: optuna.Trial):
         try:
-            # Sample hyperparameters from search space
+            # ============================================================
+            # MODEL ARCHITECTURE PARAMETERS
+            # Only tune if specified in tuning_cfg, otherwise use base
+            # ============================================================
             
-            # Model hyperparameters (architecture)
-            if is_chemeleon:
-                # CheMeleon: Only tune prediction head
-                ffn_hidden_dim = trial.suggest_categorical(
-                    "ffn_hidden_dim",
-                    tuning_cfg.get("ffn_hidden_dim_choices", [300])
-                )
-                ffn_num_layers = trial.suggest_int(
-                    "ffn_num_layers",
-                    tuning_cfg.get("ffn_num_layers_min", 1),
-                    tuning_cfg.get("ffn_num_layers_max", 3)
-                )
-                dropout = trial.suggest_float(
-                    "dropout",
-                    tuning_cfg.get("dropout_min", 0.0),
-                    tuning_cfg.get("dropout_max", 0.3)
-                )
-                
-                # Fixed from base config (CheMeleon architecture)
-                message_hidden_dim = base_model_cfg.message_hidden_dim
-                num_layers = base_model_cfg.num_layers
-                aggregation = base_model_cfg.chemprop.aggregation
-                activation = None  # Not used in Chemprop
-            elif base_model_cfg.model_type == "chemprop":
-                # Standard Chemprop: tune full architecture
+            if "message_hidden_dim_choices" in tuning_cfg:
                 message_hidden_dim = trial.suggest_categorical(
                     "message_hidden_dim",
-                    tuning_cfg.get("message_hidden_dim_choices", [300])
-                )
-                num_layers = trial.suggest_int(
-                    "num_layers",
-                    tuning_cfg.get("num_layers_min", 2),
-                    tuning_cfg.get("num_layers_max", 5)
-                )
-                ffn_hidden_dim = trial.suggest_categorical(
-                    "ffn_hidden_dim",
-                    tuning_cfg.get("ffn_hidden_dim_choices", [300])
-                )
-                ffn_num_layers = trial.suggest_int(
-                    "ffn_num_layers",
-                    tuning_cfg.get("ffn_num_layers_min", 1),
-                    tuning_cfg.get("ffn_num_layers_max", 3)
-                )
-                dropout = trial.suggest_float(
-                    "dropout",
-                    tuning_cfg.get("dropout_min", 0.0),
-                    tuning_cfg.get("dropout_max", 0.5)
-                )
-                aggregation = trial.suggest_categorical(
-                    "aggregation",
-                    tuning_cfg.get("aggregation_choices", ["mean"])
-                )
-                activation = None  # Not used in Chemprop
-            else:  # PyG model
-                message_hidden_dim = trial.suggest_categorical(
-                    "message_hidden_dim",
-                    tuning_cfg.get("message_hidden_dim_choices", [64, 128, 256])
-                )
-                num_layers = trial.suggest_int(
-                    "num_layers",
-                    tuning_cfg.get("num_layers_min", 2),
-                    tuning_cfg.get("num_layers_max", 5)
-                )
-                ffn_hidden_dim = trial.suggest_categorical(
-                    "ffn_hidden_dim",
-                    tuning_cfg.get("ffn_hidden_dim_choices", [64, 128, 256])
-                )
-                ffn_num_layers = trial.suggest_int(
-                    "ffn_num_layers",
-                    tuning_cfg.get("ffn_num_layers_min", 1),
-                    tuning_cfg.get("ffn_num_layers_max", 3)
-                )
-                dropout = trial.suggest_float(
-                    "dropout",
-                    tuning_cfg.get("dropout_min", 0.0),
-                    tuning_cfg.get("dropout_max", 0.5)
-                )
-                activation = trial.suggest_categorical(
-                    "activation",
-                    tuning_cfg.get("activation_choices", ["relu", "silu", "gelu"])
-                )
-                aggregation = None  # Not used in PyG
-            
-            # Training hyperparameters
-            learning_rate = trial.suggest_float(
-                "learning_rate",
-                tuning_cfg.get("lr_min", 1e-5),
-                tuning_cfg.get("lr_max", 1e-2),
-                log=True
-            )
-            batch_size = trial.suggest_categorical(
-                "batch_size",
-                tuning_cfg.get("batch_size_choices", [64])
-            )
-            optimizer = trial.suggest_categorical(
-                "optimizer",
-                tuning_cfg.get("optimizer_choices", ["adam"])
-            )
-            
-            weight_decay_min = tuning_cfg.get("weight_decay_min", 0.0)
-            weight_decay_max = tuning_cfg.get("weight_decay_max", 0.01)
-            
-            if weight_decay_min <= 0:
-                weight_decay = trial.suggest_float(
-                    "weight_decay",
-                    weight_decay_min,
-                    weight_decay_max,
-                    log=False
+                    tuning_cfg["message_hidden_dim_choices"]
                 )
             else:
-                weight_decay = trial.suggest_float(
-                    "weight_decay",
-                    weight_decay_min,
-                    weight_decay_max,
+                message_hidden_dim = base_model_cfg.message_hidden_dim
+            
+            if "num_layers_min" in tuning_cfg and "num_layers_max" in tuning_cfg:
+                num_layers = trial.suggest_int(
+                    "num_layers",
+                    tuning_cfg["num_layers_min"],
+                    tuning_cfg["num_layers_max"]
+                )
+            else:
+                num_layers = base_model_cfg.num_layers
+            
+            if "ffn_hidden_dim_choices" in tuning_cfg:
+                ffn_hidden_dim = trial.suggest_categorical(
+                    "ffn_hidden_dim",
+                    tuning_cfg["ffn_hidden_dim_choices"]
+                )
+            else:
+                ffn_hidden_dim = base_model_cfg.ffn_hidden_dim
+            
+            if "ffn_num_layers_min" in tuning_cfg and "ffn_num_layers_max" in tuning_cfg:
+                ffn_num_layers = trial.suggest_int(
+                    "ffn_num_layers",
+                    tuning_cfg["ffn_num_layers_min"],
+                    tuning_cfg["ffn_num_layers_max"]
+                )
+            else:
+                ffn_num_layers = base_model_cfg.ffn_num_layers
+            
+            if "dropout_min" in tuning_cfg and "dropout_max" in tuning_cfg:
+                dropout = trial.suggest_float(
+                    "dropout",
+                    tuning_cfg["dropout_min"],
+                    tuning_cfg["dropout_max"]
+                )
+            else:
+                dropout = base_model_cfg.dropout
+            
+            # Model-specific architecture parameters
+            if base_model_cfg.model_type == "chemprop":
+                if "aggregation_choices" in tuning_cfg:
+                    aggregation = trial.suggest_categorical(
+                        "aggregation",
+                        tuning_cfg["aggregation_choices"]
+                    )
+                else:
+                    aggregation = base_model_cfg.chemprop.aggregation
+                
+                activation = None  # Not used in Chemprop
+            else:  # PyG model
+                if "activation_choices" in tuning_cfg:
+                    activation = trial.suggest_categorical(
+                        "activation",
+                        tuning_cfg["activation_choices"]
+                    )
+                else:
+                    activation = base_model_cfg.pyg.activation
+                
+                aggregation = None  # Not used in PyG
+            
+            # ============================================================
+            # TRAINING PARAMETERS
+            # Only tune if specified in tuning_cfg, otherwise use base
+            # ============================================================
+            
+            if "lr_min" in tuning_cfg and "lr_max" in tuning_cfg:
+                learning_rate = trial.suggest_float(
+                    "learning_rate",
+                    tuning_cfg["lr_min"],
+                    tuning_cfg["lr_max"],
                     log=True
                 )
+            else:
+                learning_rate = base_training_cfg.learning_rate
             
-            # Optional scheduler parameters
+            if "batch_size_choices" in tuning_cfg:
+                batch_size = trial.suggest_categorical(
+                    "batch_size",
+                    tuning_cfg["batch_size_choices"]
+                )
+            else:
+                batch_size = base_training_cfg.batch_size
+            
+            if "optimizer_choices" in tuning_cfg:
+                optimizer = trial.suggest_categorical(
+                    "optimizer",
+                    tuning_cfg["optimizer_choices"]
+                )
+            else:
+                optimizer = base_training_cfg.optimizer
+            
+            if "weight_decay_min" in tuning_cfg and "weight_decay_max" in tuning_cfg:
+                weight_decay_min = tuning_cfg["weight_decay_min"]
+                weight_decay_max = tuning_cfg["weight_decay_max"]
+                
+                if weight_decay_min <= 0:
+                    weight_decay = trial.suggest_float(
+                        "weight_decay",
+                        weight_decay_min,
+                        weight_decay_max,
+                        log=False
+                    )
+                else:
+                    weight_decay = trial.suggest_float(
+                        "weight_decay",
+                        weight_decay_min,
+                        weight_decay_max,
+                        log=True
+                    )
+            else:
+                weight_decay = base_training_cfg.weight_decay
+            
+            # Loss function
+            if "loss_fn_choices" in tuning_cfg:
+                loss_fn = trial.suggest_categorical(
+                    "loss_fn",
+                    tuning_cfg["loss_fn_choices"]
+                )
+            else:
+                loss_fn = base_training_cfg.loss_fn
+            
+            # Huber delta (only used if loss is huber or smooth_l1)
+            if loss_fn in ["huber", "smooth_l1"]:
+                if "huber_delta_min" in tuning_cfg and "huber_delta_max" in tuning_cfg:
+                    huber_delta = trial.suggest_float(
+                        "huber_delta",
+                        tuning_cfg["huber_delta_min"],
+                        tuning_cfg["huber_delta_max"]
+                    )
+                else:
+                    huber_delta = base_training_cfg.huber_delta
+            else:
+                huber_delta = base_training_cfg.huber_delta
+            
+            # ============================================================
+            # SCHEDULER PARAMETERS
+            # Only tune if tune_scheduler is True
+            # ============================================================
+            
             use_scheduler = tuning_cfg.get("tune_scheduler", False)
-            scheduler_type = None
-            scheduler_patience = None
-            scheduler_factor = None
             
-            if use_scheduler:
+            if use_scheduler and "scheduler_type_choices" in tuning_cfg:
                 scheduler_type = trial.suggest_categorical(
                     "scheduler_type",
-                    tuning_cfg.get("scheduler_type_choices", ["plateau"])
+                    tuning_cfg["scheduler_type_choices"]
                 )
+                
                 if scheduler_type == "plateau":
-                    scheduler_patience = trial.suggest_int(
-                        "scheduler_patience",
-                        tuning_cfg.get("scheduler_patience_min", 5),
-                        tuning_cfg.get("scheduler_patience_max", 20)
-                    )
-                    scheduler_factor = trial.suggest_float(
-                        "scheduler_factor",
-                        tuning_cfg.get("scheduler_factor_min", 0.1),
-                        tuning_cfg.get("scheduler_factor_max", 0.7)
-                    )
+                    if "scheduler_patience_min" in tuning_cfg and "scheduler_patience_max" in tuning_cfg:
+                        scheduler_patience = trial.suggest_int(
+                            "scheduler_patience",
+                            tuning_cfg["scheduler_patience_min"],
+                            tuning_cfg["scheduler_patience_max"]
+                        )
+                    else:
+                        scheduler_patience = base_training_cfg.scheduler_patience
+                    
+                    if "scheduler_factor_min" in tuning_cfg and "scheduler_factor_max" in tuning_cfg:
+                        scheduler_factor = trial.suggest_float(
+                            "scheduler_factor",
+                            tuning_cfg["scheduler_factor_min"],
+                            tuning_cfg["scheduler_factor_max"]
+                        )
+                    else:
+                        scheduler_factor = base_training_cfg.scheduler_factor
+                else:
+                    scheduler_patience = base_training_cfg.scheduler_patience
+                    scheduler_factor = base_training_cfg.scheduler_factor
+            else:
+                # Use base config scheduler settings
+                use_scheduler = base_training_cfg.use_scheduler
+                scheduler_type = base_training_cfg.scheduler_type
+                scheduler_patience = base_training_cfg.scheduler_patience
+                scheduler_factor = base_training_cfg.scheduler_factor
             
-            # Create model configuration with sampled hyperparameters
+            # ============================================================
+            # BUILD COMPLETE CONFIG WITH SAMPLED PARAMETERS
+            # This ensures Config.__post_init__ is called, which sets
+            # the correct PyG dimensions automatically!
+            # ============================================================
+            
             if base_model_cfg.model_type == "chemprop":
-                # Copy chemprop config and update sampled params
                 chemprop_cfg = ChemPropModelConfig(
-                    aggregation=aggregation if aggregation else base_model_cfg.chemprop.aggregation,
-                    use_chemeleon=base_model_cfg.chemprop.use_chemeleon,
-                    chemeleon_checkpoint=base_model_cfg.chemprop.chemeleon_checkpoint,
-                    freeze_chemeleon=base_model_cfg.chemprop.freeze_chemeleon,
-                    chemeleon_num_layers=base_model_cfg.chemprop.chemeleon_num_layers
+                    aggregation=aggregation
                 )
                 
                 model_cfg = ModelConfig(
@@ -437,7 +514,7 @@ def build_objective(data_cfg: DataConfig,
                     chemprop=chemprop_cfg
                 )
             else:  # PyG
-                # Copy PyG config and update sampled params
+                # Copy base PyG config and only override tuned parameters
                 pyg_cfg = PyGModelConfig(
                     node_in_dim=base_model_cfg.pyg.node_in_dim,
                     edge_in_dim=base_model_cfg.pyg.edge_in_dim,
@@ -446,9 +523,10 @@ def build_objective(data_cfg: DataConfig,
                     pool_ratio=base_model_cfg.pyg.pool_ratio,
                     pool_num_heads=base_model_cfg.pyg.pool_num_heads,
                     pool_dim_feedforward=base_model_cfg.pyg.pool_dim_feedforward,
+                    pool_num_timesteps=base_model_cfg.pyg.pool_num_timesteps,
                     deepgcn=base_model_cfg.pyg.deepgcn,
                     gnn_type=base_model_cfg.pyg.gnn_type,
-                    activation=activation,
+                    activation=activation,  # Tuned parameter
                     num_heads=base_model_cfg.pyg.num_heads,
                     use_edge_features=base_model_cfg.pyg.use_edge_features
                 )
@@ -463,21 +541,50 @@ def build_objective(data_cfg: DataConfig,
                     pyg=pyg_cfg
                 )
             
-            # Create training configuration
             training_cfg = TrainingConfig(
                 learning_rate=learning_rate,
                 batch_size=batch_size,
-                num_epochs=tuning_cfg.get("epochs_per_trial", 50),
+                num_epochs=tuning_cfg.get("epochs_per_trial", base_training_cfg.num_epochs),
                 optimizer=optimizer,
                 weight_decay=weight_decay,
+                loss_fn=loss_fn,
+                huber_delta=huber_delta,
                 use_scheduler=use_scheduler,
-                scheduler_type=scheduler_type if use_scheduler else "plateau",
-                scheduler_patience=scheduler_patience if use_scheduler else 10,
-                scheduler_factor=scheduler_factor if use_scheduler else 0.5,
-                early_stop_patience=tuning_cfg.get("early_stop_patience", 15),
-                monitor_metric="val/mae",
-                monitor_mode="min"
+                scheduler_type=scheduler_type,
+                scheduler_patience=scheduler_patience,
+                scheduler_factor=scheduler_factor,
+                warmup_epochs=base_training_cfg.warmup_epochs,
+                early_stop_patience=tuning_cfg.get("early_stop_patience", base_training_cfg.early_stop_patience),
+                monitor_metric=base_training_cfg.monitor_metric,
+                monitor_mode=base_training_cfg.monitor_mode,
+                checkpoint_dir=base_training_cfg.checkpoint_dir,
+                save_top_k=base_training_cfg.save_top_k,
+                log_dir=base_training_cfg.log_dir,
+                log_every_n_steps=base_training_cfg.log_every_n_steps,
+                accelerator=base_training_cfg.accelerator,
+                devices=base_training_cfg.devices,
+                precision=base_training_cfg.precision,
+                seed=base_training_cfg.seed,
+                deterministic=base_training_cfg.deterministic
             )
+            
+            # ============================================================
+            # CREATE COMPLETE CONFIG - This triggers __post_init__!
+            # ============================================================
+            from ..config import Config
+            
+            config = Config(
+                data=data_cfg,
+                model=model_cfg,
+                training=training_cfg,
+                experiment_name=f"trial_{trial.number:04d}",
+                description=f"Optuna trial {trial.number}",
+                tags=["hyperparameter_tuning"]
+            )
+            
+            print(f"[Trial {trial.number}] Config initialized with PyG dimensions: "
+                  f"node_in_dim={config.model.pyg.node_in_dim if config.model.model_type == 'pyg' else 'N/A'}, "
+                  f"edge_in_dim={config.model.pyg.edge_in_dim if config.model.model_type == 'pyg' else 'N/A'}")
             
             # Set seed for reproducibility (unique per trial)
             if tuning_cfg.get("seed") is not None:
@@ -487,48 +594,48 @@ def build_objective(data_cfg: DataConfig,
             n_jobs = tuning_cfg.get("n_jobs", 1)
             if torch.cuda.is_available():
                 n_gpus = torch.cuda.device_count()
-                # Calculate how many trials per GPU we expect
                 trials_per_gpu = max(1, n_jobs // n_gpus)
-                
-                # Assign GPU based on trial number (round-robin across GPUs)
                 gpu_id = trial.number % n_gpus
-                
-                # Use the specific GPU device directly
-                accelerator = "gpu"
-                devices = [gpu_id]
-                
-                # Reduce num_workers for parallel trials to avoid dataloader worker overhead
-                # With multiple trials per GPU, reduce workers even more
                 num_workers = 0 if trials_per_gpu > 1 else 2
-                
                 print(f"[Trial {trial.number}] Assigned to GPU {gpu_id} (expected {trials_per_gpu} trials/GPU)")
+                
+                # Override devices in config
+                config.training.devices = [gpu_id]
+                config.training.accelerator = "gpu"
             else:
                 raise RuntimeError("No GPU available! This script requires GPU.")
             
-            # Create new datamodule for this trial with the new batch size
-            dm = RTDataModule(
-                config=data_cfg,
-                model_type=model_cfg.model_type,
+            # ============================================================
+            # USE train_from_config - reuses all the initialization logic!
+            # ============================================================
+            from .trainer import train_from_config
+            
+            # Create datamodule
+            datamodule = RTDataModule(
+                config=config.data,
+                model_type=config.model.model_type,
                 batch_size=batch_size,
                 num_workers=num_workers
             )
-            # Setup will load pre-processed data (fast)
-            dm.setup()
+            datamodule.prepare_data()
+            datamodule.setup()
             
-            # Build model
-            model = build_model(model_cfg)
-            module = ChempropRTModule(
+            # Build model using the COMPLETE config
+            model = build_model(config.model)
+            module = RTTrainer(
                 model=model,
-                training_config=training_cfg,
-                rt_mean=dm.rt_mean,
-                rt_std=dm.rt_std
+                model_type=config.model.model_type,
+                training_config=config.training,
+                rt_mean=datamodule.rt_mean,
+                rt_std=datamodule.rt_std
             )
-            # Create minimal trainer (no checkpointing or logging for speed)
+            
+            # Create minimal trainer for tuning
             trainer = L.Trainer(
-                max_epochs=training_cfg.num_epochs,
-                accelerator=accelerator,
-                devices=devices,
-                precision=training_cfg.precision,
+                max_epochs=config.training.num_epochs,
+                accelerator=config.training.accelerator,
+                devices=config.training.devices,
+                precision=config.training.precision,
                 enable_progress_bar=False,
                 logger=False,
                 enable_checkpointing=False,
@@ -537,16 +644,16 @@ def build_objective(data_cfg: DataConfig,
             )
             
             # Train the model
-            trainer.fit(module, datamodule=dm)
+            trainer.fit(module, datamodule=datamodule)
             
             # Get validation metrics
             try:
-                val_results = trainer.validate(module, datamodule=dm, verbose=False)
+                val_results = trainer.validate(module, datamodule=datamodule, verbose=False)
                 val_metrics = val_results[0] if isinstance(val_results, (list, tuple)) and len(val_results) > 0 else {}
             except Exception:
                 val_metrics = {}
             
-            # Extract the metric we want to optimize (MAE)
+            # Extract MAE
             metric = None
             for k in ("val/mae", "val_mae", "mae"):
                 if k in val_metrics:
@@ -590,36 +697,73 @@ def main():
     for i in range(n_gpus):
         print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
     
-    # Load data configuration (constant across all trials)
-    print("[hyperparam_tune] Loading data configuration...")
+    # Load configurations
+    print("[hyperparam_tune] Loading configurations...")
     data_cfg = load_yaml_to_dataclass(args.data_config, DataConfig)
-    
-    # Load base model configuration (contains CheMeleon settings)
-    print("[hyperparam_tune] Loading base model configuration...")
     base_model_cfg = load_yaml_to_dataclass(args.model_config, ModelConfig)
     
-    # Load tuning config as dictionary
-    print("[hyperparam_tune] Loading tuning configuration...")
+    # Load training config
+    training_config_path = args.model_config.parent / "training_config.yaml"
+    if not training_config_path.exists():
+        raise ValueError(f"Training config not found at {training_config_path}")
+    base_training_cfg = load_yaml_to_dataclass(training_config_path, TrainingConfig)
+    
+    # Create a complete Config object to trigger __post_init__ and get correct dimensions
+    from ..config import Config
+    base_config = Config(
+        data=data_cfg,
+        model=base_model_cfg,
+        training=base_training_cfg,
+        experiment_name="base_config",
+        description="Base configuration for hyperparameter tuning"
+    )
+    
+    print(f"[hyperparam_tune] Initialized base config with correct dimensions:")
+    if base_config.model.model_type == "pyg":
+        print(f"  PyG node_in_dim: {base_config.model.pyg.node_in_dim}")
+        print(f"  PyG edge_in_dim: {base_config.model.pyg.edge_in_dim}")
+    
+    # Now use the properly initialized configs from base_config
+    data_cfg = base_config.data
+    base_model_cfg = base_config.model
+    base_training_cfg = base_config.training
+    
+    # Load tuning config
     tuning_cfg = yaml.safe_load(Path(args.tuning_config).read_text())
     
-    print(f"[hyperparam_tune] Data config: {data_cfg}")
-    
-    # Check if using CheMeleon (handle both chemprop and pyg models)
-    is_chemeleon = (base_model_cfg.model_type == "chemprop" and 
-                    base_model_cfg.chemprop.use_chemeleon)
-    
     print(f"[hyperparam_tune] Model type: {base_model_cfg.model_type}")
-    print(f"[hyperparam_tune] Base model: {'CheMeleon' if is_chemeleon else f'Standard {base_model_cfg.model_type.upper()}'}")
+    print(f"[hyperparam_tune] Base model config: {args.model_config}")
+    print(f"[hyperparam_tune] Base training config: {training_config_path}")
     
-    if is_chemeleon:
-        print(f"[hyperparam_tune] CheMeleon checkpoint: {base_model_cfg.chemprop.chemeleon_checkpoint}")
-        print(f"[hyperparam_tune] Freeze encoder: {base_model_cfg.chemprop.freeze_chemeleon}")
+    # Determine what will be tuned
+    tuned_params = []
+    if "lr_min" in tuning_cfg and "lr_max" in tuning_cfg:
+        tuned_params.append("learning_rate")
+    if "loss_fn_choices" in tuning_cfg:
+        tuned_params.append("loss_fn")
+    if "message_hidden_dim_choices" in tuning_cfg:
+        tuned_params.append("message_hidden_dim")
+    if "num_layers_min" in tuning_cfg and "num_layers_max" in tuning_cfg:
+        tuned_params.append("num_layers")
+    if "ffn_hidden_dim_choices" in tuning_cfg:
+        tuned_params.append("ffn_hidden_dim")
+    if "ffn_num_layers_min" in tuning_cfg and "ffn_num_layers_max" in tuning_cfg:
+        tuned_params.append("ffn_num_layers")
+    if "dropout_min" in tuning_cfg and "dropout_max" in tuning_cfg:
+        tuned_params.append("dropout")
+    if "batch_size_choices" in tuning_cfg:
+        tuned_params.append("batch_size")
+    if "optimizer_choices" in tuning_cfg:
+        tuned_params.append("optimizer")
+    if "weight_decay_min" in tuning_cfg and "weight_decay_max" in tuning_cfg:
+        tuned_params.append("weight_decay")
+    
+    print(f"[hyperparam_tune] Parameters to tune: {', '.join(tuned_params) if tuned_params else 'NONE (using base config)'}")
     
     # Create output directory
     output_dir = Path(tuning_cfg.get("output_path", "results/tuning_results")).parent
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create subdirectory for this run with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     study_name = tuning_cfg.get("study_name", "rt_prediction_tuning")
     run_dir = output_dir / f"{study_name}_{timestamp}"
@@ -627,40 +771,24 @@ def main():
     
     print(f"[hyperparam_tune] Results will be saved to: {run_dir}")
     
-    # Save the configurations for reference
-    config_copy = run_dir / "tuning_config.yaml"
-    safe_write_text(config_copy, yaml.dump(tuning_cfg, default_flow_style=False, sort_keys=False))
+    # Save configurations
+    safe_write_text(run_dir / "tuning_config.yaml", 
+                   yaml.dump(tuning_cfg, default_flow_style=False, sort_keys=False))
     
-    # Convert model config to dict for saving
-    model_config_dict = {
-        'model_type': base_model_cfg.model_type,
-        'message_hidden_dim': base_model_cfg.message_hidden_dim,
-        'num_layers': base_model_cfg.num_layers,
-        'ffn_hidden_dim': base_model_cfg.ffn_hidden_dim,
-        'ffn_num_layers': base_model_cfg.ffn_num_layers,
-        'dropout': base_model_cfg.dropout,
-    }
+    model_config_dict = asdict(base_model_cfg)
+    safe_write_text(run_dir / "base_model_config.yaml",
+                   yaml.dump(model_config_dict, default_flow_style=False, sort_keys=False))
     
-    if base_model_cfg.model_type == "chemprop":
-        model_config_dict['chemprop'] = {
-            'aggregation': base_model_cfg.chemprop.aggregation,
-            'use_chemeleon': base_model_cfg.chemprop.use_chemeleon,
-            'chemeleon_checkpoint': base_model_cfg.chemprop.chemeleon_checkpoint,
-            'freeze_chemeleon': base_model_cfg.chemprop.freeze_chemeleon,
-            'chemeleon_num_layers': base_model_cfg.chemprop.chemeleon_num_layers,
-        }
-    elif base_model_cfg.model_type == "pyg":
-        model_config_dict['pyg'] = asdict(base_model_cfg.pyg)
+    training_config_dict = asdict(base_training_cfg)
+    safe_write_text(run_dir / "base_training_config.yaml",
+                   yaml.dump(training_config_dict, default_flow_style=False, sort_keys=False))
     
-    model_config_copy = run_dir / "base_model_config.yaml"
-    safe_write_text(model_config_copy, yaml.dump(model_config_dict, default_flow_style=False, sort_keys=False))
-    
-    # Prepare data once (this creates the processed data if it doesn't exist)
+    # Prepare data once
     print("[hyperparam_tune] Preparing data (one-time processing)...")
     dm_temp = RTDataModule(
         config=data_cfg,
         model_type=base_model_cfg.model_type,
-        batch_size=64,
+        batch_size=base_training_cfg.batch_size,
         num_workers=4
     )
     dm_temp.prepare_data()
@@ -670,11 +798,10 @@ def main():
     if tuning_cfg.get("seed") is not None:
         L.seed_everything(tuning_cfg["seed"], workers=True)
     
-    # Create persistent storage using SQLite for crash recovery
+    # Create persistent storage
     storage_path = run_dir / "optuna_study.db"
     storage = f"sqlite:///{storage_path}"
     
-    # Create Optuna study with persistent storage
     print("[hyperparam_tune] Creating Optuna study...")
     study = optuna.create_study(
         study_name=study_name,
@@ -685,20 +812,18 @@ def main():
     
     print(f"[hyperparam_tune] Study storage: {storage_path}")
     
-    # Build objective function (now needs study reference)
-    obj = build_objective(data_cfg, base_model_cfg, tuning_cfg, run_dir, study)
+    # Build objective function
+    obj = build_objective(data_cfg, base_model_cfg, base_training_cfg, tuning_cfg, run_dir, study)
     
-    # Add callback to save best result and summary after each trial
+    # Add callback
     def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial):
         if trial.state == optuna.trial.TrialState.COMPLETE:
             print(f"\n[Trial {trial.number}] COMPLETED - Value: {trial.value:.6f}")
             
-            # Check if we have at least one completed trial before accessing best_value
             completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
             if completed_trials:
                 print(f"[Trial {trial.number}] Best so far: {study.best_value:.6f} (Trial #{study.best_trial.number})")
                 
-                # Save both the best result and the full summary after each trial
                 try:
                     save_current_best(study, run_dir)
                     save_all_trials_summary(study, run_dir)
@@ -715,7 +840,7 @@ def main():
         elif trial.state == optuna.trial.TrialState.PRUNED:
             print(f"\n[Trial {trial.number}] PRUNED")
     
-    # Run optimization with parallel trials support
+    # Run optimization
     n_jobs = tuning_cfg.get("n_jobs", 1)
     n_trials = tuning_cfg.get("trials", 100)
     
@@ -733,7 +858,7 @@ def main():
             n_trials=n_trials,
             n_jobs=n_jobs,
             callbacks=[callback],
-            catch=(Exception,)  # Catch exceptions to continue with other trials
+            catch=(Exception,)
         )
     except KeyboardInterrupt:
         print("\n[hyperparam_tune] Optimization interrupted by user")
@@ -757,7 +882,6 @@ def main():
         for key, value in study.best_trial.params.items():
             print(f"  {key}: {value}")
         
-        # Save final results
         save_current_best(study, run_dir)
         save_all_trials_summary(study, run_dir)
     else:

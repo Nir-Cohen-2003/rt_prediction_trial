@@ -3,7 +3,7 @@
 # Optimization
 learning_rate: 0.001
 batch_size: 1024
-num_epochs: 300
+num_epochs: 200
 optimizer: "adam"
 weight_decay: 0.0
 
@@ -17,7 +17,7 @@ scheduler_type: "cosine_warmup"
 warmup_epochs: 10
 
 # Early stopping
-early_stop_patience: 50
+early_stop_patience: 30
 monitor_metric: "val/mae"
 monitor_mode: "min"
 

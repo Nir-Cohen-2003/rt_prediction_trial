@@ -16,10 +16,6 @@ dropout: 0.1
 # Chemprop-specific configuration
 chemprop:
   aggregation: "mean"  # Options: "mean", "sum", "norm", "attentive"
-  use_chemeleon: false
-  chemeleon_checkpoint: null  # Options: "chemeleon_100m", "chemeleon_300m", or path
-  freeze_chemeleon: false
-  chemeleon_num_layers: null
 
 # PyG-specific configuration
 pyg:

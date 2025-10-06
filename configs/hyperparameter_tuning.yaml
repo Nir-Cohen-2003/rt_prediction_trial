@@ -1,77 +1,31 @@
-# Hyperparameter Tuning Configuration for RT Prediction
-# This file defines the search space for Optuna optimization
+# Hyperparameter Tuning Configuration for DeepGCN RT Prediction
+# Tuning learning rate and loss function only
 
 # Study configuration
-study_name: "rt_prediction_tuning_v2"
-direction: "minimize"  # minimize validation MAE
-trials: 50  # number of trials to run
-n_jobs: 8
+study_name: "deepgcn_lr_loss_tuning"
+direction: "minimize"
+trials: 3
+n_jobs: 4
 seed: 42
 
-
 # Training configuration for each trial
-epochs_per_trial: 50
-early_stop_patience: 15
+epochs_per_trial: 200
+early_stop_patience: 30
 
 # Output
-output_path: "results/tuning_results.json"
+output_path: "results/tuning_results_deepgcn.json"
 
 # ============================================================================
-# MODEL HYPERPARAMETERS SEARCH SPACE
-# ============================================================================
-
-# Message passing network dimensions
-message_hidden_dim_choices: [8, 16, 32, 64, 128]
-
-# Number of message passing layers
-num_layers_min: 2
-num_layers_max: 4
-
-# Feed-forward network dimensions
-ffn_hidden_dim_choices: [16, 32, 64, 128]
-
-# Number of feed-forward layers
-ffn_num_layers_min: 1
-ffn_num_layers_max: 3
-
-# Dropout rate
-dropout_min: 0.0
-dropout_max: 0.5
-
-# Activation function
-activation_choices: ["relu", "silu", "gelu"]
-
-# Aggregation method
-aggregation_choices: ["mean", "sum", "norm"]
-
-# ============================================================================
-# TRAINING HYPERPARAMETERS SEARCH SPACE
+# TRAINING HYPERPARAMETERS - TUNED
 # ============================================================================
 
 # Learning rate (log scale)
-lr_min: 0.00001  # 1e-5
-lr_max: 0.01     # 1e-2
+lr_min: 0.00001
+lr_max: 0.01
 
-# Batch size
-batch_size_choices: [1024]
+# Loss function - tuned
+loss_fn_choices: ["mse", "mae", "huber", "smooth_l1"]
 
-# Optimizer
-optimizer_choices: ["adam", "adamw"]
-
-# Weight decay (log scale)
-weight_decay_min: 0.0
-weight_decay_max: 0.01
-
-# ============================================================================
-# LEARNING RATE SCHEDULER (Optional)
-# ============================================================================
-
-tune_scheduler: false
-
-scheduler_type_choices: ["plateau", "cosine"]
-
-# For ReduceLROnPlateau
-scheduler_patience_min: 5
-scheduler_patience_max: 20
-scheduler_factor_min: 0.1
-scheduler_factor_max: 0.7
+# Huber delta for huber/smooth_l1 loss
+huber_delta_min: 0.5
+huber_delta_max: 2.0
