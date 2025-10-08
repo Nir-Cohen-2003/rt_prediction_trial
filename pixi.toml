@@ -32,6 +32,7 @@ pytorch-gpu = ">=2.7.0"
 cuda-version = "12.6.*"
 pytorch_geometric = ">=2.6.1"
 pyyaml = "*"
+mces_splitting = "*"
 [pypi-dependencies]
 jax = {version = "*", extras = ["cuda12"]}
 ty = "*"
