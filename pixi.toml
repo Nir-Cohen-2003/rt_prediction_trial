@@ -10,7 +10,6 @@ cuda = "12.0"
 
 [tasks]
 check-all = "ty check src"
-# check-hyperparam = "ty check --follow-imports=normal src/training/hyperparam_tune.py"
 
 train = { cmd = "python -m src.training.trainer --data-config configs/data_config.yaml --model-config configs/model_config.yaml --training-config configs/training_config.yaml --experiment-name rt_baseline", depends-on = ["check-all"] }
 train-chemeleon = { cmd = "python -m src.training.trainer --data-config configs/data_config.yaml --model-config configs/model_config_chemeleon.yaml --training-config configs/training_config_chemeleon.yaml --experiment-name rt_chemeleon_full --description 'Fine-tuning CheMeleon 100M for RT prediction'", depends-on = ["check-all"] }
@@ -32,7 +31,8 @@ pytorch-gpu = ">=2.7.0"
 cuda-version = "12.6.*"
 pytorch_geometric = ">=2.6.1"
 pyyaml = "*"
-mces_splitting = "*"
+mces_splitting = ">=0.1.1"
+hrms_utils = ">=0.6.2"
 [pypi-dependencies]
 jax = {version = "*", extras = ["cuda12"]}
 ty = "*"

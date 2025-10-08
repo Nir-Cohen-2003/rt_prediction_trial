@@ -19,8 +19,9 @@ from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import from_smiles
 from .lmdb_dataset import LMDBGraphDataset
-from .dataset_splitting import split_random, split_scaffold, split_butina
+from .dataset_splitting import split_random, split_scaffold, split_butina, split_mces
 from .deepgcn_featurizer import get_node_features, get_edge_features
+from hrms_utils.rdkit import inchi_to_smiles_polars
 
 def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
     """
@@ -31,7 +32,7 @@ def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
         config: Data configuration with preprocessing flags
     
     Returns:
-        Cleaned dataframe
+        Cleaned dataframe with added SMILES column
     
     Note: Fill in your custom preprocessing logic here.
     """
@@ -63,6 +64,16 @@ def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
     # 4. Remove null values
     df = df.drop_nulls(subset=[config.rt_column, config.inchi_column])
     
+    # 5. Convert InChI to SMILES
+    print(f"[preprocess_raw_data] Converting InChI to SMILES...")
+    df = df.with_columns(
+        pl.col(config.inchi_column).map_batches(function=inchi_to_smiles_polars, return_dtype=pl.String,is_elementwise=True).alias("smiles") #type: ignore
+    ).filter(
+        pl.col("smiles").is_not_null(),
+        pl.col("smiles").ne("")
+    )
+
+    print(f"[preprocess_raw_data] Successfully converted {len(df)} molecules to SMILES")
     print(f"[preprocess_raw_data] Finished with {len(df)} rows")
     return df
 
@@ -165,6 +176,8 @@ class RTDataModule(L.LightningDataModule):
             'butina_cutoff': self.config.butina_cutoff,
             'butina_radius': self.config.butina_radius,
             'butina_nbits': self.config.butina_nbits,
+            'mces_initial_threshold': self.config.mces_initial_threshold,
+            'mces_min_threshold': self.config.mces_min_threshold,
             'remove_duplicates': self.config.remove_duplicates,
             'filter_invalid_inchi': self.config.filter_invalid_inchi,
             'min_rt': self.config.min_rt,
@@ -224,6 +237,8 @@ class RTDataModule(L.LightningDataModule):
                 'butina_cutoff': self.config.butina_cutoff,
                 'butina_radius': self.config.butina_radius,
                 'butina_nbits': self.config.butina_nbits,
+                'mces_initial_threshold': self.config.mces_initial_threshold,
+                'mces_min_threshold': self.config.mces_min_threshold,
                 'remove_duplicates': self.config.remove_duplicates,
                 'filter_invalid_inchi': self.config.filter_invalid_inchi,
                 'min_rt': self.config.min_rt,
@@ -267,7 +282,7 @@ class RTDataModule(L.LightningDataModule):
                 self.config.test_fraction,
                 self.config.val_fraction,
                 self.config.random_seed,
-                self.config.inchi_column
+                "smiles"  # Use smiles column after conversion
             )
         elif self.config.split_method == "butina":
             train_df, val_df, test_df = split_butina(
@@ -275,10 +290,24 @@ class RTDataModule(L.LightningDataModule):
                 self.config.test_fraction,
                 self.config.val_fraction,
                 self.config.random_seed,
-                self.config.inchi_column,
+                "smiles",  # Use smiles column after conversion
                 self.config.butina_cutoff,
                 self.config.butina_radius,
                 self.config.butina_nbits
+            )
+        elif self.config.split_method == "mces":
+            # Set MCES matrix save path if not provided
+            mces_matrix_path = self.config.mces_matrix_save_path
+            if mces_matrix_path is None:
+                mces_matrix_path = str(self.split_dir / "mces_matrix.npy")
+            
+            train_df, val_df, test_df = split_mces(
+                df,
+                self.config.test_fraction,
+                self.config.val_fraction,
+                self.config.random_seed,
+                "smiles",  # Use smiles column after conversion
+                mces_matrix_path
             )
         elif self.config.split_method == "custom":
             if self.custom_splitter is None:
@@ -473,24 +502,15 @@ class RTDataModule(L.LightningDataModule):
         skipped = 0
         
         for row in df.iter_rows(named=True):
-            inchi = row[self.config.inchi_column]
+            smiles = row["smiles"]
             rt = row[self.config.rt_column]
             
             # Normalize RT
             rt_norm = (rt - rt_mean) / rt_std
             
-            # Convert InChI to RDKit mol with proper sanitization
-            mol = Chem.MolFromInchi(inchi, sanitize=False)
+            # Convert SMILES to RDKit mol
+            mol = Chem.MolFromSmiles(smiles)
             if mol is None:
-                skipped += 1
-                continue
-            
-            # Sanitize with charge assignment
-            try:
-                Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL^Chem.SanitizeFlags.SANITIZE_PROPERTIES)
-                Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
-            except Exception as e:
-                print(f"[Warning] Failed to sanitize molecule: {e}")
                 skipped += 1
                 continue
             
@@ -499,7 +519,7 @@ class RTDataModule(L.LightningDataModule):
             datapoints.append(datapoint)
         
         if skipped > 0:
-            print(f"[Warning] Skipped {skipped} invalid InChI structures")
+            print(f"[Warning] Skipped {skipped} invalid SMILES structures")
         
         return MoleculeDataset(datapoints, featurizer=self.featurizer)
     
@@ -509,24 +529,15 @@ class RTDataModule(L.LightningDataModule):
         skipped = 0
         
         for row in df.iter_rows(named=True):
-            inchi = row[self.config.inchi_column]
+            smiles = row["smiles"]
             rt = row[self.config.rt_column]
             
             # Normalize RT
             rt_norm = (rt - rt_mean) / rt_std
             
-            # Convert InChI to RDKit mol with proper sanitization
-            mol = Chem.MolFromInchi(inchi, sanitize=False)
+            # Convert SMILES to RDKit mol
+            mol = Chem.MolFromSmiles(smiles)
             if mol is None:
-                skipped += 1
-                continue
-            
-            # Sanitize with charge assignment
-            try:
-                Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL^Chem.SanitizeFlags.SANITIZE_PROPERTIES)
-                Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
-            except Exception as e:
-                print(f"[Warning] Failed to sanitize molecule: {e}")
                 skipped += 1
                 continue
             
@@ -534,7 +545,6 @@ class RTDataModule(L.LightningDataModule):
             try:
                 if self.config.featurizer_type == "rdkit":
                     # Use PyG's built-in from_smiles
-                    smiles = Chem.MolToSmiles(mol)
                     graph = from_smiles(smiles)
                     if graph is None:
                         skipped += 1
@@ -604,7 +614,7 @@ class RTDataModule(L.LightningDataModule):
                 continue
         
         if skipped > 0:
-            print(f"[Warning] Skipped {skipped} invalid InChI structures when creating PyG graphs")
+            print(f"[Warning] Skipped {skipped} invalid SMILES structures when creating PyG graphs")
         
         return graphs
 

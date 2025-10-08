@@ -19,7 +19,7 @@ class DataConfig:
     inchi_column: str = "inchi"
     
     # Splitting
-    split_method: Literal["random", "custom", "scaffold", "butina"] = "random"
+    split_method: Literal["random", "scaffold", "butina","mces"] = "random"
     test_fraction: float = 0.1
     val_fraction: float = 0.1
     random_seed: int = 42
@@ -28,6 +28,10 @@ class DataConfig:
     butina_cutoff: float = 0.35  # Tanimoto distance threshold
     butina_radius: int = 2  # Morgan fingerprint radius
     butina_nbits: int = 2048  # Morgan fingerprint size
+    # MCES splitting parameters
+    mces_initial_threshold: int = 10  # Initial distinction threshold
+    mces_min_threshold: int = 1  # Minimum distinction threshold
+    mces_matrix_save_path: Optional[str] = None  # Path to save/load MCES matrix
     
     # Output paths
     output_dir: Path = Path("data/processed")

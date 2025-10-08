@@ -7,7 +7,7 @@ rt_column: "rt"
 inchi_column: "inchi"
 
 # Splitting
-split_method: "butina"
+split_method: "mces"
 test_fraction: 0.1
 val_fraction: 0.1
 random_seed: 42

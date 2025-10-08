@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 import time
 import gc
+from mces_splitting import split_dataset_lower_bound_only
 
 def split_random(
     df: pl.DataFrame,
@@ -64,7 +65,7 @@ def split_scaffold(
     test_fraction: float,
     val_fraction: float,
     seed: int,
-    inchi_column: str = "inchi"
+    smiles_column: str = "smiles"
 ) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """
     Scaffold-based split using Bemis-Murcko scaffolds.
@@ -77,7 +78,7 @@ def split_scaffold(
         test_fraction: Fraction for test set
         val_fraction: Fraction for validation set
         seed: Random seed for reproducibility
-        inchi_column: Name of column containing InChI strings
+        smiles_column: Name of column containing SMILES strings
     
     Returns:
         train_df, val_df, test_df
@@ -89,11 +90,11 @@ def split_scaffold(
     valid_indices = []
     
     for idx, row in enumerate(df.iter_rows(named=True)):
-        inchi = row[inchi_column]
-        mol = Chem.MolFromInchi(inchi)
+        smiles = row[smiles_column]
+        mol = Chem.MolFromSmiles(smiles)
         
         if mol is None:
-            print(f"[Warning] Invalid InChI at index {idx}, skipping")
+            print(f"[Warning] Invalid SMILES at index {idx}, skipping")
             continue
         
         try:
@@ -293,7 +294,7 @@ def split_butina(
     test_fraction: float,
     val_fraction: float,
     seed: int,
-    inchi_column: str = "inchi",
+    smiles_column: str = "smiles",
     cutoff: float = 0.35,
     radius: int = 2,
     nbits: int = 2048,
@@ -312,7 +313,7 @@ def split_butina(
         test_fraction: Fraction for test set
         val_fraction: Fraction for validation set
         seed: Random seed for reproducibility
-        inchi_column: Name of column containing InChI strings
+        smiles_column: Name of column containing SMILES strings
         cutoff: Tanimoto distance threshold for clustering (default 0.35)
         radius: Morgan fingerprint radius (default 2)
         nbits: Morgan fingerprint size (default 2048)
@@ -332,16 +333,16 @@ def split_butina(
     valid_indices = []
     
     for idx, row in enumerate(df.iter_rows(named=True)):
-        inchi = row[inchi_column]
+        smiles = row[smiles_column]
         
-        if inchi is None or inchi == "":
-            print(f"[Warning] Empty or null InChI at index {idx}, skipping")
+        if smiles is None or smiles == "":
+            print(f"[Warning] Empty or null SMILES at index {idx}, skipping")
             continue
         
-        mol = Chem.MolFromInchi(inchi)
+        mol = Chem.MolFromSmiles(smiles)
         
         if mol is None:
-            print(f"[Warning] Invalid InChI at index {idx}, skipping")
+            print(f"[Warning] Invalid SMILES at index {idx}, skipping")
             continue
         
         try:
@@ -432,4 +433,31 @@ def split_butina(
     
     print(f"[split_butina] Final split: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
     
+    return train_df, val_df, test_df
+
+def split_mces(
+    df: pl.DataFrame,
+    test_fraction: float,
+    val_fraction: float,
+    seed: int,
+    smiles_column: str = "smiles",
+    mces_matrix_save_path: Optional[str] = None
+    ) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """
+    Split the dataset into train, validation, and test sets using the MCES lower bound method.
+    """
+    smiles_list = df[smiles_column].to_list()
+    train_list, val_list, test_list, threshold = split_dataset_lower_bound_only(
+        smiles_list,
+        test_fraction=test_fraction,
+        validation_fraction=val_fraction,
+        initial_distinction_threshold=10,
+        min_distinction_threshold=1,
+        min_ratio=0.7,
+        mces_matrix_save_path=mces_matrix_save_path
+    )
+    print(f"[split_mces] Using actual MCES threshold: {threshold}")
+    train_df = df.filter(pl.col(smiles_column).is_in(train_list))
+    val_df = df.filter(pl.col(smiles_column).is_in(val_list))
+    test_df = df.filter(pl.col(smiles_column).is_in(test_list))
     return train_df, val_df, test_df
