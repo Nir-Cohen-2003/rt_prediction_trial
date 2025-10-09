@@ -175,6 +175,10 @@ class RTTrainer(L.LightningModule):
         # Compute metrics on denormalized values
         mae = torch.abs(preds_denorm - targets_denorm).mean()
         rmse = torch.sqrt(torch.pow(preds_denorm - targets_denorm, 2).mean())
+        # R2 score
+        ss_res = torch.sum((preds_denorm - targets_denorm) ** 2)
+        ss_tot = torch.sum((targets_denorm - torch.mean(targets_denorm)) ** 2)
+        r2 = 1 - ss_res / (ss_tot + 1e-8)
         
         # Log metrics with explicit batch_size
         self.log(
@@ -204,24 +208,35 @@ class RTTrainer(L.LightningModule):
             sync_dist=True,
             batch_size=batch_size
         )
+        self.log(
+            f"{stage}/r2",
+            r2,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=batch_size
+        )
         
         return loss
-    
-    def training_step(self, batch, batch_idx: int):
-        """Training step."""
-        return self._shared_step(batch, batch_idx, "train")
-    
-    def validation_step(self, batch, batch_idx: int):
-        """Validation step."""
-        return self._shared_step(batch, batch_idx, "val")
-    
-    def test_step(self, batch, batch_idx: int):
-        """Test step."""
-        return self._shared_step(batch, batch_idx, "test")
-    
+
     def on_validation_epoch_end(self):
-        """Detect sudden spikes in validation loss."""
+        """Detect sudden spikes in validation loss and print metrics."""
         val_loss = self.trainer.callback_metrics.get('val/loss')
+        val_mae = self.trainer.callback_metrics.get('val/mae')
+        val_rmse = self.trainer.callback_metrics.get('val/rmse')
+        val_r2 = self.trainer.callback_metrics.get('val/r2')
+        current_epoch = self.current_epoch if hasattr(self, "current_epoch") else self.trainer.current_epoch
+
+        # Print metrics after each validation epoch
+        print(
+            f"\nEpoch {current_epoch}: "
+            f"val/loss={val_loss:.4f} "
+            f"val/mae={val_mae:.4f} "
+            f"val/rmse={val_rmse:.4f} "
+            f"val/r2={val_r2:.4f}"
+        )
+
         if val_loss is not None:
             # Detect spike (loss increased by >3x)
             if val_loss > self.best_val_loss * 3.0:
@@ -428,7 +443,7 @@ def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTD
         logger=logger,
         log_every_n_steps=config.training.log_every_n_steps,
         deterministic=config.training.deterministic,
-        enable_progress_bar=True,
+        enable_progress_bar=False,  # Turn off progress bar
         gradient_clip_val=1.0,  # Clip gradients to prevent explosions
         gradient_clip_algorithm="norm",
         detect_anomaly=False,  # Set to True for debugging but slower

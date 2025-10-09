@@ -11,6 +11,7 @@ split_method: "mces"
 test_fraction: 0.1
 val_fraction: 0.1
 random_seed: 42
+mces_matrix_save_path: "data/processed/mces_matrix.npy"
 
 # Output paths
 output_dir: "data/processed"
