@@ -322,34 +322,34 @@ class RTDataModule(L.LightningDataModule):
             print(f"[RTDataModule] Saved MCES info to {mces_info_path}")
             print(f"[RTDataModule] Actual MCES threshold used: {actual_threshold}")
         
-    elif self.config.split_method == "custom":
-        if self.custom_splitter is None:
-            raise ValueError("custom_splitter must be provided for 'custom' split_method")
-        train_df, val_df, test_df = self.custom_splitter(df)
-    else:
-        raise ValueError(f"Unknown split_method: {self.config.split_method}")
+        elif self.config.split_method == "custom":
+            if self.custom_splitter is None:
+                raise ValueError("custom_splitter must be provided for 'custom' split_method")
+            train_df, val_df, test_df = self.custom_splitter(df)
+        else:
+            raise ValueError(f"Unknown split_method: {self.config.split_method}")
     
-    # Save splits
-    print(f"[RTDataModule] Saving splits to {self.split_dir}...")
-    train_df.write_parquet(train_path)
-    val_df.write_parquet(val_path)
-    test_df.write_parquet(test_path)
-    
-    # Compute and save statistics
-    stats = {
-        "train_size": len(train_df),
-        "val_size": len(val_df),
-        "test_size": len(test_df),
-        "rt_mean": float(train_df[self.config.rt_column].mean()),
-        "rt_std": float(train_df[self.config.rt_column].std()),
-        "rt_min": float(train_df[self.config.rt_column].min()),
-        "rt_max": float(train_df[self.config.rt_column].max())
-    }
-    
-    with open(stats_path, "w") as f:
-        json.dump(stats, f, indent=2)
-    
-    print(f"[RTDataModule] Splits saved: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
+        # Save splits
+        print(f"[RTDataModule] Saving splits to {self.split_dir}...")
+        train_df.write_parquet(train_path)
+        val_df.write_parquet(val_path)
+        test_df.write_parquet(test_path)
+        
+        # Compute and save statistics
+        stats = {
+            "train_size": len(train_df),
+            "val_size": len(val_df),
+            "test_size": len(test_df),
+            "rt_mean": float(train_df[self.config.rt_column].mean()),
+            "rt_std": float(train_df[self.config.rt_column].std()),
+            "rt_min": float(train_df[self.config.rt_column].min()),
+            "rt_max": float(train_df[self.config.rt_column].max())
+        }
+        
+        with open(stats_path, "w") as f:
+            json.dump(stats, f, indent=2)
+        
+        print(f"[RTDataModule] Splits saved: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
     
     def _prepare_graphs(self):
         """Prepare featurized graphs for the current featurizer and model type."""
