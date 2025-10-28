@@ -4,6 +4,7 @@ import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 from lightning.pytorch.loggers import CSVLogger
 from pathlib import Path
+from typing import Literal, Optional, Mapping
 import json
 import argparse
 import yaml
@@ -219,6 +220,17 @@ class RTTrainer(L.LightningModule):
         )
         
         return loss
+    def training_step(self, batch, batch_idx: int):
+        """Training step."""
+        return self._shared_step(batch, batch_idx, "train")
+    
+    def validation_step(self, batch, batch_idx: int):
+        """Validation step."""
+        return self._shared_step(batch, batch_idx, "val")
+    
+    def test_step(self, batch, batch_idx: int):
+        """Test step."""
+        return self._shared_step(batch, batch_idx, "test")
 
     def on_validation_epoch_end(self):
         """Detect sudden spikes in validation loss and print metrics."""
@@ -330,7 +342,7 @@ class RTTrainer(L.LightningModule):
         return [optimizer], [scheduler]
 
 
-def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTDataModule]:
+def train_from_config(config: Config) -> tuple[L.Trainer, RTTrainer, RTDataModule, list[Mapping[str, float | int]] | None]:
     """
     Main training function that orchestrates the entire pipeline.
     
@@ -351,6 +363,7 @@ def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTD
         trainer: Lightning Trainer instance
         module: Trained Lightning module
         datamodule: DataModule with processed data
+        test_results: A list of dictionaries containing the test metrics.
     """
     print("[train_from_config] Starting training pipeline")
     
@@ -456,15 +469,16 @@ def train_from_config(config: Config) -> tuple[L.Trainer, L.LightningModule, RTD
     
     # Test with best checkpoint
     print("[train_from_config] Testing with best checkpoint...")
+    test_results = None
     if checkpoint_callback.best_model_path:
         print(f"[train_from_config] Loading best model from {checkpoint_callback.best_model_path}")
-        trainer.test(module, datamodule=datamodule, ckpt_path=checkpoint_callback.best_model_path)
+        test_results = trainer.test(module, datamodule=datamodule, ckpt_path=checkpoint_callback.best_model_path)
     else:
         print("[train_from_config] No best checkpoint found, testing with final model")
-        trainer.test(module, datamodule=datamodule)
+        test_results = trainer.test(module, datamodule=datamodule)
     
     print("[train_from_config] Training complete!")
-    return trainer, module, datamodule
+    return trainer, module, datamodule, test_results
 
 
 
@@ -566,11 +580,16 @@ def main():
     print(f"Epochs: {config.training.num_epochs}\n")
     
     # Train the model
-    trainer, module, datamodule = train_from_config(config)
+    trainer, module, datamodule, test_results = train_from_config(config)
     
     print("\nTraining completed successfully!")
     print(f"Logs saved to: {config.training.log_dir}/{config.experiment_name}")
     print(f"Checkpoints saved to: {config.training.checkpoint_dir}/{config.experiment_name}")
+
+    if test_results:
+        print("\nTest Results:")
+        for key, value in test_results[0].items():
+            print(f"  {key}: {value:.4f}")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ train-chemeleon = { cmd = "python -m src.training.trainer --data-config configs/
 train-chemeleon-frozen = { cmd = "python -m src.training.trainer --data-config configs/data_config.yaml --model-config configs/model_config_chemeleon_frozen.yaml --training-config configs/training_config_chemeleon.yaml --experiment-name rt_chemeleon_frozen --description 'Training only the prediction head on frozen CheMeleon encoder'", depends-on = ["check-all"] }
 tune = { cmd = "python -m src.training.hyperparam_tune --data-config configs/data_config.yaml --model-config configs/model_config.yaml --tuning-config configs/hyperparameter_tuning.yaml", depends-on = ["check-all"] }
 tune-chemeleon = { cmd = "python -m src.training.hyperparam_tune --data-config configs/data_config.yaml --model-config configs/model_config_chemeleon.yaml --tuning-config configs/hyperparameter_tuning_chemeleon.yaml", depends-on = ["check-all"] }
+compare-sizes = { cmd = "python systematic_size_comparison.py", depends-on = ["check-all"] }
 
 [dependencies]
 python = "3.12.*"
