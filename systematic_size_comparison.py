@@ -12,9 +12,9 @@ def main():
     Systematically compares different data splitting methods and model sizes
     for the deepgcn model.
     """
-    split_methods = ["butina", "mces"] #"random", "scaffold", 
-    depths = [8, 16] # 2, , 
-    widths = [ 128, 256] #32, 64, 128,
+    split_methods = ["random", "mces"] #"random", "scaffold", 
+    depths = [8] # 2, , 
+    widths = [ 512, 1024, 2048] #32, 64, 128,
     
     base_data_config = load_yaml_to_dataclass(Path("configs/data_config.yaml"), DataConfig)
     base_model_config = load_yaml_to_dataclass(Path("configs/model_config.yaml"), ModelConfig)
