@@ -442,9 +442,12 @@ def split_mces(
     seed: int,
     smiles_column: str = "smiles",
     mces_matrix_save_path: Optional[str] = None
-    ) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    ) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, int]:
     """
     Split the dataset into train, validation, and test sets using the MCES lower bound method.
+    
+    Returns:
+        Tuple of (train_df, val_df, test_df, actual_threshold)
     """
     smiles_list = df[smiles_column].to_list()
     train_list, val_list, test_list, threshold = split_dataset_lower_bound_only(
@@ -460,4 +463,4 @@ def split_mces(
     train_df = df.filter(pl.col(smiles_column).is_in(train_list))
     val_df = df.filter(pl.col(smiles_column).is_in(val_list))
     test_df = df.filter(pl.col(smiles_column).is_in(test_list))
-    return train_df, val_df, test_df
+    return train_df, val_df, test_df, threshold

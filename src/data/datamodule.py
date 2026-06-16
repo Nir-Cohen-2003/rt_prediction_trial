@@ -301,7 +301,7 @@ class RTDataModule(L.LightningDataModule):
             if mces_matrix_path is None:
                 mces_matrix_path = str(self.split_dir / "mces_matrix.npy")
             
-            train_df, val_df, test_df = split_mces(
+            train_df, val_df, test_df, actual_threshold = split_mces(
                 df,
                 self.config.test_fraction,
                 self.config.val_fraction,
@@ -309,13 +309,26 @@ class RTDataModule(L.LightningDataModule):
                 "smiles",  # Use smiles column after conversion
                 mces_matrix_path
             )
+            
+            # Save the actual MCES threshold used
+            mces_info_path = self.split_dir / "mces_info.json"
+            mces_info = {
+                "actual_threshold_used": int(actual_threshold),
+                "initial_threshold": self.config.mces_initial_threshold,
+                "min_threshold": self.config.mces_min_threshold
+            }
+            with open(mces_info_path, "w") as f:
+                json.dump(mces_info, f, indent=2)
+            print(f"[RTDataModule] Saved MCES info to {mces_info_path}")
+            print(f"[RTDataModule] Actual MCES threshold used: {actual_threshold}")
+        
         elif self.config.split_method == "custom":
             if self.custom_splitter is None:
                 raise ValueError("custom_splitter must be provided for 'custom' split_method")
             train_df, val_df, test_df = self.custom_splitter(df)
         else:
             raise ValueError(f"Unknown split_method: {self.config.split_method}")
-        
+    
         # Save splits
         print(f"[RTDataModule] Saving splits to {self.split_dir}...")
         train_df.write_parquet(train_path)
