@@ -1,14 +1,14 @@
-# Data configuration for RT prediction
+# Data configuration for multi-target RT + CCS prediction
 
 # Input data
 raw_data_path: "data/raw/SMRT_dataset.csv"
 cid_column: "pubchem"
-target_columns: ["rt"]
+target_columns: ["rt", "ccs"]
 inchi_column: "inchi"
 dataset_name: "default"
 
 # Splitting
-split_method: "mces"
+split_method: "random"
 test_fraction: 0.1
 val_fraction: 0.1
 random_seed: 42
@@ -23,7 +23,7 @@ test_file: "test.parquet"
 # Preprocessing
 remove_duplicates: true
 filter_invalid_inchi: true
-target_filters: {rt: [400, null]}
+target_filters: {rt: [400, null], ccs: [null, null]}
 
 # Molecule featurization - applies to BOTH Chemprop and PyG models
 featurizer_type: "rdkit_deepgcn"

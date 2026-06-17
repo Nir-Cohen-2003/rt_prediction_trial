@@ -538,6 +538,10 @@ def build_objective(data_cfg: DataConfig,
             # CREATE COMPLETE CONFIG - This triggers __post_init__!
             # ============================================================
             
+            # Ensure the model output dimension matches the number of targets.
+            num_targets = len(data_cfg.target_columns)
+            model_cfg.num_targets = num_targets
+
             config = Config(
                 data=data_cfg,
                 model=model_cfg,
@@ -546,6 +550,7 @@ def build_objective(data_cfg: DataConfig,
                 description=f"Optuna trial {trial.number}",
                 tags=["hyperparameter_tuning"]
             )
+            config.model.num_targets = num_targets
             
             print(f"[Trial {trial.number}] Config initialized with PyG dimensions: "
                   f"node_in_dim={config.model.pyg.node_in_dim if config.model.model_type == 'pyg' else 'N/A'}, "
@@ -596,8 +601,8 @@ def build_objective(data_cfg: DataConfig,
                 model=model,
                 model_type=config.model.model_type,
                 training_config=config.training,
-                rt_mean=datamodule.rt_mean,
-                rt_std=datamodule.rt_std
+                target_means=datamodule.target_means,
+                target_stds=datamodule.target_stds
             )
             
             # Create minimal trainer for tuning
@@ -625,13 +630,14 @@ def build_objective(data_cfg: DataConfig,
             
             # Extract MAE
             metric = None
-            for k in ("val/mae", "val_mae", "mae"):
+            for k in ("val/mae_mean", "val/mae", "val_mae", "mae"):
                 if k in val_metrics:
                     metric = val_metrics[k]
                     break
             
             if metric is None:
-                metric = trainer.callback_metrics.get("val/mae") or \
+                metric = trainer.callback_metrics.get("val/mae_mean") or \
+                         trainer.callback_metrics.get("val/mae") or \
                          trainer.callback_metrics.get("val_mae") or \
                          trainer.callback_metrics.get("mae")
             

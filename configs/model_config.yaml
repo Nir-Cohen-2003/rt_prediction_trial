@@ -32,7 +32,7 @@ pyg:
   pool_num_timesteps: 2  # Only for AttentiveFP readout
   
   # Generic GNN settings
-  gnn_type: "deepgcn"  # Options: "gcn", "gin", "transformer", "deepgcn"
+  gnn_type: "deepgcn"  # Options: "gcn", "gat", "graphsage", "gin", "transformer", "deepgcn"
   activation: "relu"  # Options: "relu", "silu", "gelu"
   num_heads: 4  # For transformer
   use_edge_features: true

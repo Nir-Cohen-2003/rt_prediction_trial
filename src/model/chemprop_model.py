@@ -69,7 +69,7 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
             hidden_dim=message_hidden_dim,
             n_layers=2,
             dropout=0.0,
-            n_tasks=1
+            n_tasks=model_config.num_targets
         )
         
         # Build the model
@@ -105,7 +105,7 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
             hidden_dim=model_config.ffn_hidden_dim,
             n_layers=model_config.ffn_num_layers,
             dropout=model_config.dropout,
-            n_tasks=1
+            n_tasks=model_config.num_targets
         )
         
         print(f"[build_chemprop_mpnn] CheMeleon model loaded and adapted for RT prediction")
@@ -144,7 +144,7 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
         hidden_dim=model_config.ffn_hidden_dim,
         n_layers=model_config.ffn_num_layers,
         dropout=model_config.dropout,
-        n_tasks=1
+        n_tasks=model_config.num_targets
     )
     
     # Full MPNN model

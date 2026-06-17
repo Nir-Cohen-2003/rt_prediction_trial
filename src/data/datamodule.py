@@ -19,16 +19,16 @@ from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import from_smiles
 from .lmdb_dataset import LMDBGraphDataset
-from .dataset_splitting import split_random, split_scaffold, split_butina, split_mces
+from .dataset_splitting import split_random, split_scaffold, split_butina, split_mces, split_mces_umap
 from .deepgcn_featurizer import get_node_features, get_edge_features
 from hrms_utils.rdkit import inchi_to_smiles_polars
 
 def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
     """
-    Preprocess the raw RT data.
+    Preprocess the raw data.
     
     Args:
-        df: Raw dataframe with CID, RT, and InChI columns
+        df: Raw dataframe with CID, target columns, and InChI column
         config: Data configuration with preprocessing flags
     
     Returns:
@@ -40,8 +40,8 @@ def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
     
     # Example preprocessing steps (implement your actual logic):
     
-    # 1. Remove duplicates
-    if config.remove_duplicates:
+    # 1. Remove duplicates (uses CID column when present)
+    if config.remove_duplicates and config.cid_column in df.columns:
         initial_len = len(df)
         df = df.unique(subset=[config.cid_column])
         print(f"[preprocess_raw_data] Removed {initial_len - len(df)} duplicate CIDs")
@@ -52,17 +52,22 @@ def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
         # Example: df = df.filter(pl.col(config.inchi_column).str.starts_with("InChI="))
         pass
     
-    # 3. Filter RT range
-    if config.min_rt is not None:
-        df = df.filter(pl.col(config.rt_column) >= config.min_rt)
-        print(f"[preprocess_raw_data] Filtered RT < {config.min_rt}")
+    # 3. Per-target range filters. Null values are preserved so rows missing
+    #    one target can still contribute to other targets.
+    for col, (min_val, max_val) in config.target_filters.items():
+        if col not in df.columns:
+            print(f"[preprocess_raw_data] [Warning] target_filters column '{col}' not in dataframe, skipping")
+            continue
+        if min_val is not None:
+            df = df.filter(pl.col(col).is_null() | (pl.col(col) >= min_val))
+            print(f"[preprocess_raw_data] Filtered {col} < {min_val} (nulls kept)")
+        if max_val is not None:
+            df = df.filter(pl.col(col).is_null() | (pl.col(col) <= max_val))
+            print(f"[preprocess_raw_data] Filtered {col} > {max_val} (nulls kept)")
     
-    if config.max_rt is not None:
-        df = df.filter(pl.col(config.rt_column) <= config.max_rt)
-        print(f"[preprocess_raw_data] Filtered RT > {config.max_rt}")
-    
-    # 4. Remove null values
-    df = df.drop_nulls(subset=[config.rt_column, config.inchi_column])
+    # 4. Drop rows with null InChI. We deliberately do NOT drop rows just
+    #    because a target value is missing; the trainer masks missing targets.
+    df = df.drop_nulls(subset=[config.inchi_column])
     
     # 5. Convert InChI to SMILES
     print(f"[preprocess_raw_data] Converting InChI to SMILES...")
@@ -124,10 +129,10 @@ class RTDataModule(L.LightningDataModule):
         self.val_dataset = None
         self.test_dataset = None
         
-        # Statistics for normalization - NOT optional, must be set during setup
-        # Using sentinel values to detect if setup() was called
-        self.rt_mean: float = float('nan')
-        self.rt_std: float = float('nan')
+        # Per-target normalization statistics, populated during setup.
+        self.target_columns: list[str] = list(config.target_columns)
+        self.target_means: dict[str, float] = {}
+        self.target_stds: dict[str, float] = {}
         
         # Compute hash-based output directories
         self._compute_output_dirs()
@@ -167,8 +172,10 @@ class RTDataModule(L.LightningDataModule):
         split_config = {
             'raw_data_path': str(self.config.raw_data_path),
             'cid_column': self.config.cid_column,
-            'rt_column': self.config.rt_column,
             'inchi_column': self.config.inchi_column,
+            'dataset_name': self.config.dataset_name,
+            'target_columns': list(self.config.target_columns),
+            'target_filters': {k: list(v) for k, v in self.config.target_filters.items()},
             'split_method': self.config.split_method,
             'test_fraction': self.config.test_fraction,
             'val_fraction': self.config.val_fraction,
@@ -178,10 +185,14 @@ class RTDataModule(L.LightningDataModule):
             'butina_nbits': self.config.butina_nbits,
             'mces_initial_threshold': self.config.mces_initial_threshold,
             'mces_min_threshold': self.config.mces_min_threshold,
+            'mces_umap_n_components': self.config.mces_umap_n_components,
+            'mces_umap_n_neighbors': self.config.mces_umap_n_neighbors,
+            'mces_umap_min_dist': self.config.mces_umap_min_dist,
+            'mces_umap_hdbscan_min_cluster_size': self.config.mces_umap_hdbscan_min_cluster_size,
+            'mces_umap_hdbscan_min_samples': self.config.mces_umap_hdbscan_min_samples,
+            'mces_umap_min_ratio': self.config.mces_umap_min_ratio,
             'remove_duplicates': self.config.remove_duplicates,
             'filter_invalid_inchi': self.config.filter_invalid_inchi,
-            'min_rt': self.config.min_rt,
-            'max_rt': self.config.max_rt,
         }
         
         # Hash for split directory
@@ -228,8 +239,10 @@ class RTDataModule(L.LightningDataModule):
             split_config = {
                 'raw_data_path': str(self.config.raw_data_path),
                 'cid_column': self.config.cid_column,
-                'rt_column': self.config.rt_column,
                 'inchi_column': self.config.inchi_column,
+                'dataset_name': self.config.dataset_name,
+                'target_columns': list(self.config.target_columns),
+                'target_filters': {k: list(v) for k, v in self.config.target_filters.items()},
                 'split_method': self.config.split_method,
                 'test_fraction': self.config.test_fraction,
                 'val_fraction': self.config.val_fraction,
@@ -239,10 +252,14 @@ class RTDataModule(L.LightningDataModule):
                 'butina_nbits': self.config.butina_nbits,
                 'mces_initial_threshold': self.config.mces_initial_threshold,
                 'mces_min_threshold': self.config.mces_min_threshold,
+                'mces_umap_n_components': self.config.mces_umap_n_components,
+                'mces_umap_n_neighbors': self.config.mces_umap_n_neighbors,
+                'mces_umap_min_dist': self.config.mces_umap_min_dist,
+                'mces_umap_hdbscan_min_cluster_size': self.config.mces_umap_hdbscan_min_cluster_size,
+                'mces_umap_hdbscan_min_samples': self.config.mces_umap_hdbscan_min_samples,
+                'mces_umap_min_ratio': self.config.mces_umap_min_ratio,
                 'remove_duplicates': self.config.remove_duplicates,
                 'filter_invalid_inchi': self.config.filter_invalid_inchi,
-                'min_rt': self.config.min_rt,
-                'max_rt': self.config.max_rt,
             }
             with open(split_config_path, "w") as f:
                 json.dump(split_config, f, indent=2, default=str)
@@ -322,6 +339,58 @@ class RTDataModule(L.LightningDataModule):
             print(f"[RTDataModule] Saved MCES info to {mces_info_path}")
             print(f"[RTDataModule] Actual MCES threshold used: {actual_threshold}")
         
+        elif self.config.split_method == "mces_umap":
+            # Set MCES bounds matrix save path if not provided
+            mces_matrix_path = self.config.mces_matrix_save_path
+            if mces_matrix_path is None:
+                mces_matrix_path = str(self.split_dir / "mces_bounds_matrix.npy")
+            
+            train_df, val_df, test_df, bounds_matrix, umap_embedding = split_mces_umap(
+                df,
+                test_fraction=self.config.test_fraction,
+                val_fraction=self.config.val_fraction,
+                seed=self.config.random_seed,
+                smiles_column="smiles",
+                mces_matrix_save_path=mces_matrix_path,
+                n_components=self.config.mces_umap_n_components,
+                n_neighbors=self.config.mces_umap_n_neighbors,
+                min_dist=self.config.mces_umap_min_dist,
+                hdbscan_min_cluster_size=self.config.mces_umap_hdbscan_min_cluster_size,
+                hdbscan_min_samples=self.config.mces_umap_hdbscan_min_samples,
+                min_ratio=self.config.mces_umap_min_ratio,
+            )
+            
+            # Save the bounds matrix and UMAP embedding for reproducibility
+            bounds_matrix_path = self.split_dir / "mces_bounds_matrix.npy"
+            np.save(bounds_matrix_path, bounds_matrix)
+            print(f"[RTDataModule] Saved MCES bounds matrix to {bounds_matrix_path}")
+            
+            umap_embedding_path = self.split_dir / "mces_umap_embedding.npy"
+            np.save(umap_embedding_path, umap_embedding)
+            print(f"[RTDataModule] Saved UMAP embedding to {umap_embedding_path}")
+            
+            # Save mces_umap info json
+            mces_umap_info_path = self.split_dir / "mces_umap_info.json"
+            mces_umap_info = {
+                "random_seed": int(self.config.random_seed),
+                "mces_matrix_path": str(mces_matrix_path),
+                "umap": {
+                    "n_components": int(self.config.mces_umap_n_components),
+                    "n_neighbors": (int(self.config.mces_umap_n_neighbors)
+                                    if self.config.mces_umap_n_neighbors is not None else None),
+                    "min_dist": float(self.config.mces_umap_min_dist),
+                },
+                "hdbscan": {
+                    "min_cluster_size": (int(self.config.mces_umap_hdbscan_min_cluster_size)
+                                         if self.config.mces_umap_hdbscan_min_cluster_size is not None else None),
+                    "min_samples": int(self.config.mces_umap_hdbscan_min_samples),
+                },
+                "min_ratio": float(self.config.mces_umap_min_ratio),
+            }
+            with open(mces_umap_info_path, "w") as f:
+                json.dump(mces_umap_info, f, indent=2)
+            print(f"[RTDataModule] Saved MCES-UMAP info to {mces_umap_info_path}")
+        
         elif self.config.split_method == "custom":
             if self.custom_splitter is None:
                 raise ValueError("custom_splitter must be provided for 'custom' split_method")
@@ -335,21 +404,48 @@ class RTDataModule(L.LightningDataModule):
         val_df.write_parquet(val_path)
         test_df.write_parquet(test_path)
         
-        # Compute and save statistics
+        # Compute and save per-target statistics on the training set only,
+        # using only non-null values per target.
+        target_means: dict[str, float] = {}
+        target_stds: dict[str, float] = {}
+        target_mins: dict[str, float] = {}
+        target_maxs: dict[str, float] = {}
+        for col in self.config.target_columns:
+            if col not in train_df.columns:
+                raise ValueError(
+                    f"Target column '{col}' not found in training dataframe. "
+                    f"Available columns: {train_df.columns}"
+                )
+            non_null = train_df.filter(pl.col(col).is_not_null())[col]
+            if len(non_null) == 0:
+                raise ValueError(
+                    f"Target column '{col}' has no non-null values in the training set; "
+                    f"cannot compute statistics."
+                )
+            target_means[col] = float(non_null.mean())
+            # polars std is sample std (ddof=1) by default; cast to float explicitly
+            target_stds[col] = float(non_null.std())
+            target_mins[col] = float(non_null.min())
+            target_maxs[col] = float(non_null.max())
+        
         stats = {
             "train_size": len(train_df),
             "val_size": len(val_df),
             "test_size": len(test_df),
-            "rt_mean": float(train_df[self.config.rt_column].mean()),
-            "rt_std": float(train_df[self.config.rt_column].std()),
-            "rt_min": float(train_df[self.config.rt_column].min()),
-            "rt_max": float(train_df[self.config.rt_column].max())
+            "target_means": target_means,
+            "target_stds": target_stds,
+            "target_mins": target_mins,
+            "target_maxs": target_maxs,
         }
         
         with open(stats_path, "w") as f:
             json.dump(stats, f, indent=2)
         
         print(f"[RTDataModule] Splits saved: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
+        for col in self.config.target_columns:
+            print(f"[RTDataModule]   {col}: mean={target_means[col]:.4f}, "
+                  f"std={target_stds[col]:.4f}, "
+                  f"min={target_mins[col]:.4f}, max={target_maxs[col]:.4f}")
     
     def _prepare_graphs(self):
         """Prepare featurized graphs for the current featurizer and model type."""
@@ -373,8 +469,8 @@ class RTDataModule(L.LightningDataModule):
         stats_path = self.split_dir / "stats.json"
         with open(stats_path, "r") as f:
             stats = json.load(f)
-        rt_mean = stats["rt_mean"]
-        rt_std = stats["rt_std"]
+        target_means: dict[str, float] = {k: float(v) for k, v in stats["target_means"].items()}
+        target_stds: dict[str, float] = {k: float(v) for k, v in stats["target_stds"].items()}
         
         # Paths for datasets
         if self.model_type == "chemprop":
@@ -393,9 +489,9 @@ class RTDataModule(L.LightningDataModule):
             
             # Create Chemprop datasets
             print("[RTDataModule] Creating Chemprop datasets...")
-            train_dataset = self._polars_to_chemprop(train_df, rt_mean, rt_std)
-            val_dataset = self._polars_to_chemprop(val_df, rt_mean, rt_std)
-            test_dataset = self._polars_to_chemprop(test_df, rt_mean, rt_std)
+            train_dataset = self._polars_to_chemprop(train_df, target_means, target_stds)
+            val_dataset = self._polars_to_chemprop(val_df, target_means, target_stds)
+            test_dataset = self._polars_to_chemprop(test_df, target_means, target_stds)
             
             # Save
             with open(train_path, "wb") as f:
@@ -423,9 +519,9 @@ class RTDataModule(L.LightningDataModule):
             
             # Create PyG datasets
             print("[RTDataModule] Creating PyG datasets...")
-            train_graphs = self._polars_to_pyg(train_df, rt_mean, rt_std)
-            val_graphs = self._polars_to_pyg(val_df, rt_mean, rt_std)
-            test_graphs = self._polars_to_pyg(test_df, rt_mean, rt_std)
+            train_graphs = self._polars_to_pyg(train_df, target_means, target_stds)
+            val_graphs = self._polars_to_pyg(val_df, target_means, target_stds)
+            test_graphs = self._polars_to_pyg(test_df, target_means, target_stds)
             
             # Save to LMDB
             LMDBGraphDataset.from_graphs(train_graphs, str(train_path))
@@ -452,23 +548,51 @@ class RTDataModule(L.LightningDataModule):
         with open(stats_path, "r") as f:
             stats = json.load(f)
         
-        # Validate that required statistics exist
-        if "rt_mean" not in stats or "rt_std" not in stats:
+        # Validate that required per-target statistics exist
+        if "target_means" not in stats or "target_stds" not in stats:
             raise ValueError(
-                f"Statistics file {stats_path} is missing required fields 'rt_mean' or 'rt_std'"
+                f"Statistics file {stats_path} is missing required fields 'target_means' or 'target_stds'"
             )
         
-        self.rt_mean = float(stats["rt_mean"])
-        self.rt_std = float(stats["rt_std"])
-        
-        # Validate statistics are valid numbers
-        if not (0 < self.rt_std < float('inf')):
+        target_means_raw = stats["target_means"]
+        target_stds_raw = stats["target_stds"]
+        if not isinstance(target_means_raw, dict) or not isinstance(target_stds_raw, dict):
             raise ValueError(
-                f"Invalid RT standard deviation: {self.rt_std}. "
-                f"Must be a positive finite number."
+                f"Statistics file {stats_path} has invalid types for "
+                f"'target_means' or 'target_stds' (expected dict)."
             )
         
-        print(f"[RTDataModule] Loaded stats: RT mean={self.rt_mean:.2f}, std={self.rt_std:.2f}")
+        self.target_means = {k: float(v) for k, v in target_means_raw.items()}
+        self.target_stds = {k: float(v) for k, v in target_stds_raw.items()}
+        
+        # Validate that every configured target has a mean/std and that each std
+        # is a positive finite number.
+        for col in self.config.target_columns:
+            if col not in self.target_means:
+                raise ValueError(
+                    f"Statistics file {stats_path} is missing mean for target '{col}'"
+                )
+            if col not in self.target_stds:
+                raise ValueError(
+                    f"Statistics file {stats_path} is missing std for target '{col}'"
+                )
+            std = self.target_stds[col]
+            mean = self.target_means[col]
+            if not (np.isfinite(std) and std > 0):
+                raise ValueError(
+                    f"Invalid standard deviation for target '{col}': {std}. "
+                    f"Must be a positive finite number."
+                )
+            if not np.isfinite(mean):
+                raise ValueError(
+                    f"Invalid mean for target '{col}': {mean}. "
+                    f"Must be a finite number."
+                )
+        
+        print(f"[RTDataModule] Loaded per-target stats:")
+        for col in self.config.target_columns:
+            print(f"[RTDataModule]   {col}: mean={self.target_means[col]:.4f}, "
+                  f"std={self.target_stds[col]:.4f}")
         
         if self.model_type == "chemprop":
             # Load pre-saved Chemprop datasets
@@ -509,17 +633,26 @@ class RTDataModule(L.LightningDataModule):
         print(f"[RTDataModule] setup: train={len(self.train_dataset)}, "
               f"val={len(self.val_dataset)}, test={len(self.test_dataset)}")
     
-    def _polars_to_chemprop(self, df: pl.DataFrame, rt_mean: float, rt_std: float) -> MoleculeDataset:
+    def _polars_to_chemprop(self, df: pl.DataFrame, target_means: dict, target_stds: dict) -> MoleculeDataset:
         """Convert Polars DataFrame to Chemprop MoleculeDataset using configured featurizer."""
         datapoints = []
         skipped = 0
+        target_columns = list(self.config.target_columns)
+        num_targets = len(target_columns)
         
         for row in df.iter_rows(named=True):
             smiles = row["smiles"]
-            rt = row[self.config.rt_column]
             
-            # Normalize RT
-            rt_norm = (rt - rt_mean) / rt_std
+            # Build normalized target vector of shape (num_targets,). Missing
+            # values (None) become np.nan; present values are normalized with
+            # their per-target mean/std.
+            y = np.empty(num_targets, dtype=np.float64)
+            for i, col in enumerate(target_columns):
+                val = row.get(col)
+                if val is None:
+                    y[i] = np.nan
+                else:
+                    y[i] = (float(val) - target_means[col]) / target_stds[col]
             
             # Convert SMILES to RDKit mol
             mol = Chem.MolFromSmiles(smiles)
@@ -528,7 +661,7 @@ class RTDataModule(L.LightningDataModule):
                 continue
             
             # Create datapoint - MoleculeDatapoint expects numpy array for targets
-            datapoint = MoleculeDatapoint(mol, np.array([rt_norm]))
+            datapoint = MoleculeDatapoint(mol, y=y)
             datapoints.append(datapoint)
         
         if skipped > 0:
@@ -536,17 +669,32 @@ class RTDataModule(L.LightningDataModule):
         
         return MoleculeDataset(datapoints, featurizer=self.featurizer)
     
-    def _polars_to_pyg(self, df, rt_mean: float, rt_std: float):
+    def _polars_to_pyg(self, df, target_means: dict, target_stds: dict):
         """Convert Polars DataFrame to PyG dataset using configured featurizer."""
         graphs = []
         skipped = 0
+        target_columns = list(self.config.target_columns)
+        num_targets = len(target_columns)
         
         for row in df.iter_rows(named=True):
             smiles = row["smiles"]
-            rt = row[self.config.rt_column]
             
-            # Normalize RT
-            rt_norm = (rt - rt_mean) / rt_std
+            # Build normalized target tensor of shape (num_targets,) and a
+            # boolean mask tensor of shape (num_targets,). Missing target
+            # values become float('nan') and the corresponding mask entry is
+            # False so the trainer can ignore them.
+            y_values = []
+            y_mask_values = []
+            for col in target_columns:
+                val = row.get(col)
+                if val is None:
+                    y_values.append(float('nan'))
+                    y_mask_values.append(False)
+                else:
+                    y_values.append((float(val) - target_means[col]) / target_stds[col])
+                    y_mask_values.append(True)
+            y_tensor = torch.tensor(y_values, dtype=torch.float)
+            y_mask_tensor = torch.tensor(y_mask_values, dtype=torch.bool)
             
             # Convert SMILES to RDKit mol
             mol = Chem.MolFromSmiles(smiles)
@@ -562,8 +710,9 @@ class RTDataModule(L.LightningDataModule):
                     if graph is None:
                         skipped += 1
                         continue
-                    # Add y label
-                    graph.y = torch.tensor([rt_norm], dtype=torch.float)
+                    # Add y label and mask
+                    graph.y = y_tensor
+                    graph.y_mask = y_mask_tensor
                 
                 elif self.config.featurizer_type == "rdkit_deepgcn":
                     # Use DeepGCN featurizer
@@ -594,7 +743,8 @@ class RTDataModule(L.LightningDataModule):
                         x=x,
                         edge_index=edge_index,
                         edge_attr=edge_attr,
-                        y=torch.tensor([rt_norm], dtype=torch.float)
+                        y=y_tensor,
+                        y_mask=y_mask_tensor,
                     )
                 
                 else:
@@ -616,7 +766,8 @@ class RTDataModule(L.LightningDataModule):
                         x=x,
                         edge_index=edge_index,
                         edge_attr=edge_attr,
-                        y=torch.tensor([rt_norm], dtype=torch.float)
+                        y=y_tensor,
+                        y_mask=y_mask_tensor,
                     )
                 
                 graphs.append(graph)

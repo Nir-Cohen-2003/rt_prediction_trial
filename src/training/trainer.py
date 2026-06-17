@@ -77,24 +77,51 @@ class RTTrainer(L.LightningModule):
         model,
         model_type: str,
         training_config: TrainingConfig,
-        rt_mean: float,
-        rt_std: float
+        target_means: dict[str, float],
+        target_stds: dict[str, float]
     ):
         """
         Args:
             model: Pre-built model (Chemprop MPNN or PyG GNN)
             model_type: "chemprop" or "pyg"
             training_config: Training configuration (optimizer, scheduler, etc.)
-            rt_mean: Mean RT for denormalization
-            rt_std: Std RT for denormalization
+            target_means: Per-target means for denormalization, keyed by target name.
+                Insertion order defines the index of each target.
+            target_stds: Per-target standard deviations for denormalization, keyed by
+                target name. Must contain the same keys as ``target_means`` in the
+                same order.
         """
         super().__init__()
         self.model = model
         self.model_type = model_type
         self.training_config = training_config
-        self.rt_mean = rt_mean
-        self.rt_std = rt_std
-        
+
+        # Store per-target normalization statistics. The dictionaries are preserved
+        # in insertion order so the per-target tensor buffers below line up with the
+        # model's output channels.
+        self.target_means = dict(target_means)
+        self.target_stds = dict(target_stds)
+        self.num_targets = len(target_means)
+        if self.num_targets == 0:
+            raise ValueError("target_means must be non-empty")
+        if set(target_means.keys()) != set(target_stds.keys()):
+            raise ValueError(
+                "target_means and target_stds must contain the same keys, got "
+                f"{sorted(target_means.keys())} vs {sorted(target_stds.keys())}"
+            )
+
+        # Register per-target means/stds as buffers so they move to the model's
+        # device automatically (e.g. with .to(device) or via Lightning's hooks).
+        target_keys = list(target_means.keys())
+        self.register_buffer(
+            "target_means_tensor",
+            torch.tensor([target_means[k] for k in target_keys], dtype=torch.float32),
+        )
+        self.register_buffer(
+            "target_stds_tensor",
+            torch.tensor([target_stds[k] for k in target_keys], dtype=torch.float32),
+        )
+
         # Select loss function
         if training_config.loss_fn == "mse":
             self.loss_fn = nn.MSELoss()
@@ -106,15 +133,17 @@ class RTTrainer(L.LightningModule):
             self.loss_fn = nn.SmoothL1Loss(beta=training_config.huber_delta)
         else:
             raise ValueError(f"Unknown loss function: {training_config.loss_fn}")
-        
-        print(f"[ChempropRTModule] Using loss function: {training_config.loss_fn}")
+
+        print(f"[RTTrainer] Using loss function: {training_config.loss_fn}")
         if training_config.loss_fn in ["huber", "smooth_l1"]:
-            print(f"[ChempropRTModule] Huber delta: {training_config.huber_delta}")
-        
+            print(f"[RTTrainer] Huber delta: {training_config.huber_delta}")
+        print(f"[RTTrainer] Number of targets: {self.num_targets} "
+              f"({', '.join(target_keys)})")
+
         # Track best validation loss for anomaly detection
         self.best_val_loss = float('inf')
         self.val_loss_spike_count = 0
-        
+
         # Save hyperparameters (excluding the model itself to avoid duplication)
         self.save_hyperparameters(ignore=["model"])
     
@@ -138,88 +167,151 @@ class RTTrainer(L.LightningModule):
     def _shared_step(self, batch, batch_idx: int, stage: str):
         """
         Shared step logic for train/val/test.
-        
+
+        Supports multi-target prediction by computing an unweighted sum of
+        per-target losses, denormalizing each target independently, and
+        logging per-target and aggregate metrics.
+
         Args:
             batch: Chemprop batch or PyG batch
             batch_idx: Batch index
             stage: One of "train", "val", or "test"
-        
+
         Returns:
             Loss value
         """
         # Forward pass
-        preds = self(batch).squeeze(-1)
-        
+        preds = self(batch)
+
         # Extract targets depending on model type
         if self.model_type == "chemprop":
-            targets = batch.Y.squeeze(-1)
+            targets = batch.Y
+            batch_size = batch.Y.shape[0]
         else:
             # PyG batch
-            targets = batch.y.squeeze(-1)
-        
-        # Get actual batch size
-        batch_size = len(targets)
-        
-        # Compute loss (on normalized values)
-        loss = self.loss_fn(preds, targets)
-        
+            targets = batch.y
+            batch_size = int(batch.batch.max().item()) + 1
+
+        # Reshape predictions/targets to (batch_size, num_targets).
+        preds = preds.reshape(batch_size, self.num_targets)
+        targets = targets.reshape(batch_size, self.num_targets)
+
+        # Build a boolean mask of valid targets. For Chemprop, missing targets
+        # are encoded as NaN. For PyG, prefer the explicit ``y_mask`` attribute
+        # produced by the datamodule and fall back to NaN detection.
+        if self.model_type == "chemprop":
+            mask = ~torch.isnan(targets)
+        else:
+            if hasattr(batch, "y_mask") and batch.y_mask is not None:
+                mask = batch.y_mask.reshape(batch_size, self.num_targets).bool()
+            else:
+                mask = ~torch.isnan(targets)
+
+        # Compute an unweighted sum of per-target losses. For each target with
+        # at least one valid entry in the batch, apply the configured loss on
+        # the masked entries and sum across targets. Targets with no valid
+        # entries in the batch are skipped.
+        total_loss = torch.zeros((), device=preds.device, dtype=preds.dtype)
+        for j in range(self.num_targets):
+            target_mask = mask[:, j]
+            if not target_mask.any():
+                continue
+            preds_j = preds[:, j][target_mask]
+            targets_j = targets[:, j][target_mask]
+            target_loss = self.loss_fn(preds_j, targets_j)
+            if not (torch.isnan(target_loss) or torch.isinf(target_loss)):
+                total_loss = total_loss + target_loss
+
         # Check for NaN/Inf in loss during training
-        if stage == "train" and (torch.isnan(loss) or torch.isinf(loss)):
+        if stage == "train" and (torch.isnan(total_loss) or torch.isinf(total_loss)):
             self.log('train/nan_loss', 1.0, batch_size=batch_size)
             # Return a safe loss to prevent crash
-            return torch.tensor(0.0, requires_grad=True, device=loss.device)
-        
-        # Denormalize for interpretable metrics
-        preds_denorm = preds * self.rt_std + self.rt_mean
-        targets_denorm = targets * self.rt_std + self.rt_mean
-        
-        # Compute metrics on denormalized values
-        mae = torch.abs(preds_denorm - targets_denorm).mean()
-        rmse = torch.sqrt(torch.pow(preds_denorm - targets_denorm, 2).mean())
-        # R2 score
-        ss_res = torch.sum((preds_denorm - targets_denorm) ** 2)
-        ss_tot = torch.sum((targets_denorm - torch.mean(targets_denorm)) ** 2)
-        r2 = 1 - ss_res / (ss_tot + 1e-8)
-        
-        # Log metrics with explicit batch_size
+            return torch.tensor(0.0, requires_grad=True, device=preds.device)
+
+        # Denormalize for interpretable metrics using per-target buffers.
+        preds_denorm = preds * self.target_stds_tensor + self.target_means_tensor
+        targets_denorm = targets * self.target_stds_tensor + self.target_means_tensor
+
+        # Compute per-target metrics on the masked-in entries.
+        target_names = list(self.target_means.keys())
+        maes: list[torch.Tensor] = []
+        rmses: list[torch.Tensor] = []
+        r2s: list[torch.Tensor] = []
+        for j in range(self.num_targets):
+            target_mask = mask[:, j]
+            if not target_mask.any():
+                continue
+            p_j = preds_denorm[:, j][target_mask]
+            t_j = targets_denorm[:, j][target_mask]
+            diff = p_j - t_j
+            mae_j = torch.abs(diff).mean()
+            rmse_j = torch.sqrt(torch.pow(diff, 2).mean())
+            # R² score
+            ss_res = torch.sum(diff ** 2)
+            ss_tot = torch.sum((t_j - t_j.mean()) ** 2)
+            r2_j = 1 - ss_res / (ss_tot + 1e-8)
+            name = target_names[j]
+            self.log(
+                f"{stage}/mae_{name}", mae_j,
+                on_step=False, on_epoch=True, sync_dist=True, batch_size=batch_size,
+            )
+            self.log(
+                f"{stage}/rmse_{name}", rmse_j,
+                on_step=False, on_epoch=True, sync_dist=True, batch_size=batch_size,
+            )
+            self.log(
+                f"{stage}/r2_{name}", r2_j,
+                on_step=False, on_epoch=True, sync_dist=True, batch_size=batch_size,
+            )
+            maes.append(mae_j)
+            rmses.append(rmse_j)
+            r2s.append(r2_j)
+
+        # Aggregate (mean across targets) metrics. If no target had any valid
+        # entries in the batch, fall back to zero scalars.
+        if maes:
+            mae_mean = torch.stack(maes).mean()
+            rmse_mean = torch.stack(rmses).mean()
+            r2_mean = torch.stack(r2s).mean()
+        else:
+            zero = torch.zeros((), device=preds.device, dtype=preds.dtype)
+            mae_mean = rmse_mean = r2_mean = zero
+
+        # Log loss, aggregate metrics, and the backward-compatible aliases.
         self.log(
-            f"{stage}/loss",
-            loss,
-            prog_bar=True,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-            batch_size=batch_size
+            f"{stage}/loss", total_loss,
+            prog_bar=True, on_step=False, on_epoch=True,
+            sync_dist=True, batch_size=batch_size,
         )
         self.log(
-            f"{stage}/mae",
-            mae,
-            prog_bar=(stage != "train"),
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-            batch_size=batch_size
+            f"{stage}/mae", mae_mean,
+            prog_bar=(stage != "train"), on_step=False, on_epoch=True,
+            sync_dist=True, batch_size=batch_size,
         )
         self.log(
-            f"{stage}/rmse",
-            rmse,
-            prog_bar=False,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-            batch_size=batch_size
+            f"{stage}/mae_mean", mae_mean,
+            on_step=False, on_epoch=True, sync_dist=True, batch_size=batch_size,
         )
         self.log(
-            f"{stage}/r2",
-            r2,
-            prog_bar=False,
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-            batch_size=batch_size
+            f"{stage}/rmse", rmse_mean,
+            prog_bar=False, on_step=False, on_epoch=True,
+            sync_dist=True, batch_size=batch_size,
         )
-        
-        return loss
+        self.log(
+            f"{stage}/rmse_mean", rmse_mean,
+            on_step=False, on_epoch=True, sync_dist=True, batch_size=batch_size,
+        )
+        self.log(
+            f"{stage}/r2", r2_mean,
+            prog_bar=False, on_step=False, on_epoch=True,
+            sync_dist=True, batch_size=batch_size,
+        )
+        self.log(
+            f"{stage}/r2_mean", r2_mean,
+            on_step=False, on_epoch=True, sync_dist=True, batch_size=batch_size,
+        )
+
+        return total_loss
     def training_step(self, batch, batch_idx: int):
         """Training step."""
         return self._shared_step(batch, batch_idx, "train")
@@ -382,30 +474,44 @@ def train_from_config(config: Config) -> tuple[L.Trainer, RTTrainer, RTDataModul
     # Prepare and setup data (loads or processes data)
     datamodule.prepare_data()
     datamodule.setup()
-    
+
+    # Set number of targets based on the datamodule's target columns, then
+    # build the model so its output dimension matches.
+    config.model.num_targets = len(datamodule.target_columns)
+    print(f"[train_from_config] Using num_targets={config.model.num_targets} "
+          f"({', '.join(datamodule.target_columns)})")
+
     # Build model using generic factory
     print(f"[train_from_config] Building {config.model.model_type} model...")
     model = build_model(config.model)
-    
+
     # Wrap in Lightning module
     module = RTTrainer(
         model=model,
         model_type=config.model.model_type,
         training_config=config.training,
-        rt_mean=datamodule.rt_mean,
-        rt_std=datamodule.rt_std
+        target_means=datamodule.target_means,
+        target_stds=datamodule.target_stds
     )
-    
+
+    # Dataset-aware output paths (keeps experiments isolated across datasets).
+    checkpoint_dir = (
+        config.training.checkpoint_dir
+        / config.data.dataset_name
+        / config.experiment_name
+    )
+    log_dir = config.training.log_dir / config.data.dataset_name
+
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
-        dirpath=config.training.checkpoint_dir / config.experiment_name,
+        dirpath=checkpoint_dir,
         filename="best_model",
         monitor=config.training.monitor_metric,
         mode=config.training.monitor_mode,
         save_top_k=config.training.save_top_k,
         save_last=True
     )
-    
+
     early_stop_callback = EarlyStopping(
         monitor=config.training.monitor_metric,
         patience=config.training.early_stop_patience,
@@ -413,15 +519,15 @@ def train_from_config(config: Config) -> tuple[L.Trainer, RTTrainer, RTDataModul
         verbose=True,
         check_finite=True  # Stop if loss becomes NaN/Inf
     )
-    
+
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
-    
+
     # Add gradient monitoring
     grad_monitor = GradientClippingCallback()
-    
+
     # Setup logger
     logger = CSVLogger(
-        save_dir=config.training.log_dir,
+        save_dir=log_dir,
         name=config.experiment_name
     )
     
@@ -472,11 +578,15 @@ def train_from_config(config: Config) -> tuple[L.Trainer, RTTrainer, RTDataModul
     test_results = None
     if checkpoint_callback.best_model_path:
         print(f"[train_from_config] Loading best model from {checkpoint_callback.best_model_path}")
-        test_results = trainer.test(module, datamodule=datamodule, ckpt_path=checkpoint_callback.best_model_path)
+        # PyTorch 2.6+ defaults to weights_only=True, but checkpoints contain
+        # dataclass hyperparameters. Load manually and test without ckpt_path.
+        ckpt = torch.load(checkpoint_callback.best_model_path, map_location="cpu", weights_only=False)
+        module.load_state_dict(ckpt["state_dict"])
+        test_results = trainer.test(module, datamodule=datamodule)
     else:
         print("[train_from_config] No best checkpoint found, testing with final model")
         test_results = trainer.test(module, datamodule=datamodule)
-    
+
     print("[train_from_config] Training complete!")
     return trainer, module, datamodule, test_results
 

@@ -162,7 +162,8 @@ class DeeperGCN(nn.Module):
                  pool_dim_feedforward=128,
                  pool_num_timesteps=2,
                  ffn_hidden_dim=300,
-                 ffn_num_layers=2):
+                 ffn_num_layers=2,
+                 num_targets=1):
         super(DeeperGCN, self).__init__()
         
         self.num_layers = num_layers
@@ -238,7 +239,7 @@ class DeeperGCN(nn.Module):
                 mlp_list.append(nn.Linear(ffn_hidden_dim, ffn_hidden_dim))
             mlp_list.append(get_activation(activation))
             mlp_list.append(nn.Dropout(dropout))
-        mlp_list.append(nn.Linear(ffn_hidden_dim, 1))
+        mlp_list.append(nn.Linear(ffn_hidden_dim, num_targets))
         
         self.out_mlp = nn.Sequential(*mlp_list)
     
@@ -252,6 +253,11 @@ class DeeperGCN(nn.Module):
         """
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
         
+        # Ensure float inputs (some featurizers return Long tensors).
+        x = x.float()
+        if edge_attr is not None:
+            edge_attr = edge_attr.float()
+
         # Initial encoding
         x = self.node_encoder(x)
         edge_attr = self.edge_encoder(edge_attr)
@@ -315,7 +321,8 @@ def build_deep_gcn(model_config: ModelConfig) -> nn.Module:
         pool_dim_feedforward=pyg_cfg.pool_dim_feedforward,
         pool_num_timesteps=pyg_cfg.pool_num_timesteps,
         ffn_hidden_dim=model_config.ffn_hidden_dim,
-        ffn_num_layers=model_config.ffn_num_layers
+        ffn_num_layers=model_config.ffn_num_layers,
+        num_targets=model_config.num_targets
     )
     
     return model

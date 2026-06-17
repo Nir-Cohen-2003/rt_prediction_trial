@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import time
 import gc
-from mces_splitting import split_dataset_lower_bound_only
+from mces_splitting import split_dataset_lower_bound_only, split_dataset_umap
 
 def split_random(
     df: pl.DataFrame,
@@ -464,3 +464,76 @@ def split_mces(
     val_df = df.filter(pl.col(smiles_column).is_in(val_list))
     test_df = df.filter(pl.col(smiles_column).is_in(test_list))
     return train_df, val_df, test_df, threshold
+
+
+def split_mces_umap(
+    df: pl.DataFrame,
+    test_fraction: float,
+    val_fraction: float,
+    seed: int,
+    smiles_column: str = "smiles",
+    mces_matrix_save_path: Optional[str] = None,
+    n_components: int = 2,
+    n_neighbors: Optional[int] = None,
+    min_dist: float = 0.1,
+    hdbscan_min_cluster_size: Optional[int] = None,
+    hdbscan_min_samples: int = 1,
+    min_ratio: float = 0.7,
+) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, np.ndarray, np.ndarray]:
+    """
+    Split the dataset into train, validation, and test sets using MCES + UMAP + HDBSCAN.
+
+    Embeds the MCES lower-bound distance matrix with UMAP, clusters the embedding with
+    HDBSCAN, and distributes clusters across the splits.
+
+    Args:
+        df: Input dataframe (must contain a SMILES column).
+        test_fraction: Fraction for test set.
+        val_fraction: Fraction for validation set.
+        seed: Random seed for UMAP and cluster shuffling.
+        smiles_column: Name of column containing SMILES strings.
+        mces_matrix_save_path: If provided, saves the lower-bound matrix to this path.
+        n_components: UMAP embedding dimension (default 2).
+        n_neighbors: UMAP n_neighbors; if None, umap default is used.
+        min_dist: UMAP min_dist (default 0.1).
+        hdbscan_min_cluster_size: HDBSCAN min_cluster_size; if None, hdbscan default is used.
+        hdbscan_min_samples: HDBSCAN min_samples (default 1).
+        min_ratio: Minimum required size ratio for validation/test vs target.
+
+    Returns:
+        Tuple of (train_df, val_df, test_df, bounds_matrix, umap_embedding)
+    """
+    smiles_list = df[smiles_column].to_list()
+
+    # Build UMAP kwargs: metric is fixed to "precomputed" inside split_dataset_umap,
+    # but we set random_state explicitly so it is honored.
+    umap_kwargs: dict = {
+        "n_components": n_components,
+        "min_dist": min_dist,
+        "random_state": seed,
+    }
+    if n_neighbors is not None:
+        umap_kwargs["n_neighbors"] = n_neighbors
+
+    # Build HDBSCAN kwargs.
+    hdbscan_kwargs: dict = {
+        "min_samples": hdbscan_min_samples,
+    }
+    if hdbscan_min_cluster_size is not None:
+        hdbscan_kwargs["min_cluster_size"] = hdbscan_min_cluster_size
+
+    train_list, val_list, test_list, bounds_matrix, umap_embedding = split_dataset_umap(
+        smiles_list,
+        validation_fraction=val_fraction,
+        test_fraction=test_fraction,
+        min_ratio=min_ratio,
+        mces_matrix_save_path=mces_matrix_save_path,
+        hdbscan_kwargs=hdbscan_kwargs,
+        **umap_kwargs,
+    )
+
+    train_df = df.filter(pl.col(smiles_column).is_in(train_list))
+    val_df = df.filter(pl.col(smiles_column).is_in(val_list))
+    test_df = df.filter(pl.col(smiles_column).is_in(test_list))
+
+    return train_df, val_df, test_df, bounds_matrix, umap_embedding

@@ -10,3 +10,4 @@ logs/**
 results/**
 **.e**
 node_modules/
+.slim/deepwork/

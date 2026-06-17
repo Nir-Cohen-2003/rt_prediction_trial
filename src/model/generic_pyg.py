@@ -29,13 +29,16 @@ class GenericPyGModel(nn.Module):
                  num_heads=4,
                  edge_dim=None,
                  ffn_hidden_dim=300,
-                 ffn_num_layers=2):
+                 ffn_num_layers=2,
+                 num_targets=1,
+                 use_edge_features=True):
         super(GenericPyGModel, self).__init__()
         
         self.num_layers = num_layers
         self.dropout = dropout
         self.gnn_type = gnn_type.lower()
         self.pool_type = pool_type
+        self.use_edge_features = use_edge_features
         
         # Get activation function
         self.activation_fn = get_activation(activation)
@@ -71,8 +74,24 @@ class GenericPyGModel(nn.Module):
                     beta=True
                 )
             
+            elif self.gnn_type == 'gat':
+                conv = gnn.GATConv(
+                    hid_dim,
+                    hid_dim // num_heads,
+                    heads=num_heads,
+                    dropout=dropout,
+                    edge_dim=edge_dim if use_edge_features else None,
+                    concat=True
+                )
+            
+            elif self.gnn_type == 'graphsage':
+                conv = gnn.SAGEConv(hid_dim, hid_dim)
+            
             else:
-                raise ValueError(f"Unknown gnn_type: {self.gnn_type}")
+                raise ValueError(
+                    f"Unknown gnn_type: {self.gnn_type}. "
+                    f"Supported types: gcn, gat, graphsage, gin, transformer."
+                )
             
             self.convs.append(conv)
             self.batch_norms.append(nn.BatchNorm1d(hid_dim))
@@ -107,7 +126,7 @@ class GenericPyGModel(nn.Module):
                 mlp_layers.append(nn.Linear(ffn_hidden_dim, ffn_hidden_dim))
             mlp_layers.append(get_activation(activation))
             mlp_layers.append(nn.Dropout(dropout))
-        mlp_layers.append(nn.Linear(ffn_hidden_dim, 1))
+        mlp_layers.append(nn.Linear(ffn_hidden_dim, num_targets))
         
         self.out_mlp = nn.Sequential(*mlp_layers)
     
@@ -115,6 +134,11 @@ class GenericPyGModel(nn.Module):
         """Forward pass."""
         x, edge_index, edge_attr, batch = data.x, data.edge_index, data.edge_attr, data.batch
         
+        # Ensure float inputs (e.g., from from_smiles returns Long features).
+        x = x.float()
+        if edge_attr is not None:
+            edge_attr = edge_attr.float()
+
         # Initial encoding
         x = self.node_encoder(x)
         edge_attr_encoded = self.edge_encoder(edge_attr) if self.edge_encoder else None
@@ -130,6 +154,13 @@ class GenericPyGModel(nn.Module):
                 x = conv(x, edge_index)
             elif self.gnn_type == 'transformer':
                 x = conv(x, edge_index, edge_attr_encoded)
+            elif self.gnn_type == 'gat':
+                if self.use_edge_features and edge_attr is not None:
+                    x = conv(x, edge_index, edge_attr=edge_attr)
+                else:
+                    x = conv(x, edge_index)
+            elif self.gnn_type == 'graphsage':
+                x = conv(x, edge_index)
             
             # Batch normalization
             x = self.batch_norms[i](x)
@@ -189,9 +220,11 @@ def build_pyg_model(model_config: ModelConfig) -> nn.Module:
         pool_num_heads=pyg_cfg.pool_num_heads,
         pool_dim_feedforward=pyg_cfg.pool_dim_feedforward,
         num_heads=pyg_cfg.num_heads,
-        edge_dim=edge_dim if pyg_cfg.gnn_type == 'transformer' else None,
+        edge_dim=edge_dim if pyg_cfg.gnn_type in ('transformer', 'gat') else None,
         ffn_hidden_dim=model_config.ffn_hidden_dim,
-        ffn_num_layers=model_config.ffn_num_layers
+        ffn_num_layers=model_config.ffn_num_layers,
+        num_targets=model_config.num_targets,
+        use_edge_features=pyg_cfg.use_edge_features
     )
     
     return model

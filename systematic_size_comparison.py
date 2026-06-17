@@ -53,6 +53,9 @@ def main():
                 tags=["systematic_comparison", "deepgcn"]
             )
 
+            # Ensure the model output dimension matches the number of targets.
+            config.model.num_targets = len(config.data.target_columns)
+
             # --- Modify config for the current run ---
             # Data
             config.data.split_method = split_method
@@ -75,7 +78,7 @@ def main():
                         "depth": depth,
                         "width": width,
                         "num_params": num_params,
-                        "test/mae": test_results[0].get("test/mae", float("nan")),
+                        "test/mae": test_results[0].get("test/mae_mean", test_results[0].get("test/mae", float("nan"))),
                         "test/rmse": test_results[0].get("test/rmse", float("nan")),
                         "test/r2": test_results[0].get("test/r2", float("nan")),
                     }

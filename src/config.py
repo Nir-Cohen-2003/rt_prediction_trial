@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, asdict
-from typing import Literal, Optional
+from typing import Literal, Optional, cast
 from pathlib import Path
 from chemprop.featurizers.atom import (
                 MultiHotAtomFeaturizer,
@@ -15,11 +15,12 @@ class DataConfig:
     # Input data
     raw_data_path: Path
     cid_column: str = "cid"
-    rt_column: str = "rt"  # in seconds
+    target_columns: list[str] = field(default_factory=lambda: ["rt"])  # Names of target columns to predict
     inchi_column: str = "inchi"
+    dataset_name: str = "default"  # Used to make output dirs / experiment names dataset-aware
     
     # Splitting
-    split_method: Literal["random", "scaffold", "butina","mces"] = "random"
+    split_method: Literal["random", "scaffold", "butina", "mces", "mces_umap"] = "random"
     test_fraction: float = 0.1
     val_fraction: float = 0.1
     random_seed: int = 42
@@ -32,6 +33,13 @@ class DataConfig:
     mces_initial_threshold: int = 10  # Initial distinction threshold
     mces_min_threshold: int = 1  # Minimum distinction threshold
     mces_matrix_save_path: Optional[str] = None  # Path to save/load MCES matrix
+    # MCES-UMAP splitting parameters
+    mces_umap_n_components: int = 2
+    mces_umap_n_neighbors: Optional[int] = None
+    mces_umap_min_dist: float = 0.1
+    mces_umap_hdbscan_min_cluster_size: Optional[int] = None
+    mces_umap_hdbscan_min_samples: int = 1
+    mces_umap_min_ratio: float = 0.7
     
     # Output paths
     output_dir: Path = Path("data/processed")
@@ -42,17 +50,25 @@ class DataConfig:
     # Preprocessing flags
     remove_duplicates: bool = True
     filter_invalid_inchi: bool = True
-    min_rt: Optional[float] = None
-    max_rt: Optional[float] = None
+    target_filters: dict[str, tuple[Optional[float], Optional[float]]] = field(default_factory=dict)
     
     # Molecule featurization - applies to BOTH Chemprop and PyG models
     # Note: "rdkit" and "rdkit_deepgcn" are only valid for PyG models
     featurizer_type: Literal["simple", "v1", "v2", "organic", "rigr", "rdkit", "rdkit_deepgcn"] = "rigr"
     
     def __post_init__(self):
-        """Convert string paths to Path objects."""
+        """Convert string paths to Path objects and normalize target_filters."""
         self.raw_data_path = Path(self.raw_data_path)
         self.output_dir = Path(self.output_dir)
+        
+        # YAML loads tuple-typed values as lists; convert them back to tuples
+        # so target_filters keeps a consistent tuple-typed mapping.
+        if self.target_filters:
+            self.target_filters = {
+                k: cast(tuple[Optional[float], Optional[float]],
+                        tuple(v) if isinstance(v, list) else v)
+                for k, v in self.target_filters.items()
+            }
 
 
 @dataclass
@@ -86,7 +102,7 @@ class PyGModelConfig:
     deepgcn: DeepGCNConfig = field(default_factory=DeepGCNConfig)
     
     # Generic GNN settings
-    gnn_type: Literal["gcn", "gin", "transformer", "deepgcn"] = "gcn"
+    gnn_type: Literal["gcn", "gat", "graphsage", "gin", "transformer", "deepgcn"] = "gcn"
     activation: Literal["relu", "silu", "gelu"] = "relu"
     num_heads: int = 4  # For transformer
     use_edge_features: bool = True
@@ -129,6 +145,7 @@ class ModelConfig:
     ffn_hidden_dim: int = 64
     ffn_num_layers: int = 2
     dropout: float = 0.0
+    num_targets: int = 1  # Number of prediction targets; updated by train_from_config
 
     # Model-specific settings (mutually exclusive)
     chemprop: ChemPropModelConfig = field(default_factory=ChemPropModelConfig)
