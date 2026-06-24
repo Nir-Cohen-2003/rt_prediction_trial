@@ -65,20 +65,37 @@ def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
             df = df.filter(pl.col(col).is_null() | (pl.col(col) <= max_val))
             print(f"[preprocess_raw_data] Filtered {col} > {max_val} (nulls kept)")
     
-    # 4. Drop rows with null InChI. We deliberately do NOT drop rows just
-    #    because a target value is missing; the trainer masks missing targets.
-    df = df.drop_nulls(subset=[config.inchi_column])
-    
-    # 5. Convert InChI to SMILES
-    print(f"[preprocess_raw_data] Converting InChI to SMILES...")
-    df = df.with_columns(
-        pl.col(config.inchi_column).map_batches(function=inchi_to_smiles_polars, return_dtype=pl.String,is_elementwise=True).alias("smiles") #type: ignore
-    ).filter(
-        pl.col("smiles").is_not_null(),
-        pl.col("smiles").ne("")
+    # 4. Determine the SMILES source. If a smiles_column is configured and
+    #    present in the dataframe, use it directly. Otherwise fall back to
+    #    converting the InChI column.
+    has_smiles_column = (
+        config.smiles_column is not None and config.smiles_column in df.columns
     )
+    smiles_source = config.smiles_column if has_smiles_column else config.inchi_column
 
-    print(f"[preprocess_raw_data] Successfully converted {len(df)} molecules to SMILES")
+    # 5. Drop rows with null SMILES source. We deliberately do NOT drop rows
+    #    just because a target value is missing; the trainer masks missing targets.
+    df = df.drop_nulls(subset=[smiles_source])
+
+    # 6. Materialize a canonical "smiles" column.
+    if has_smiles_column:
+        print(f"[preprocess_raw_data] Using pre-existing SMILES column '{config.smiles_column}'")
+        if config.smiles_column != "smiles":
+            df = df.rename({config.smiles_column: "smiles"})
+        df = df.filter(
+            pl.col("smiles").is_not_null(),
+            pl.col("smiles").ne("")
+        )
+    else:
+        print(f"[preprocess_raw_data] Converting InChI to SMILES...")
+        df = df.with_columns(
+            pl.col(config.inchi_column).map_batches(function=inchi_to_smiles_polars, return_dtype=pl.String, is_elementwise=True).alias("smiles") #type: ignore
+        ).filter(
+            pl.col("smiles").is_not_null(),
+            pl.col("smiles").ne("")
+        )
+
+    print(f"[preprocess_raw_data] Successfully prepared {len(df)} molecules with SMILES")
     print(f"[preprocess_raw_data] Finished with {len(df)} rows")
     return df
 
@@ -173,6 +190,8 @@ class RTDataModule(L.LightningDataModule):
             'raw_data_path': str(self.config.raw_data_path),
             'cid_column': self.config.cid_column,
             'inchi_column': self.config.inchi_column,
+            'smiles_column': self.config.smiles_column,
+            'csv_separator': self.config.csv_separator,
             'dataset_name': self.config.dataset_name,
             'target_columns': list(self.config.target_columns),
             'target_filters': {k: list(v) for k, v in self.config.target_filters.items()},
@@ -194,7 +213,7 @@ class RTDataModule(L.LightningDataModule):
             'remove_duplicates': self.config.remove_duplicates,
             'filter_invalid_inchi': self.config.filter_invalid_inchi,
         }
-        
+
         # Hash for split directory
         split_str = json.dumps(split_config, sort_keys=True, default=str)
         split_hash = hashlib.sha256(split_str.encode()).hexdigest()[:16]
@@ -240,6 +259,8 @@ class RTDataModule(L.LightningDataModule):
                 'raw_data_path': str(self.config.raw_data_path),
                 'cid_column': self.config.cid_column,
                 'inchi_column': self.config.inchi_column,
+                'smiles_column': self.config.smiles_column,
+                'csv_separator': self.config.csv_separator,
                 'dataset_name': self.config.dataset_name,
                 'target_columns': list(self.config.target_columns),
                 'target_filters': {k: list(v) for k, v in self.config.target_filters.items()},
@@ -278,9 +299,20 @@ class RTDataModule(L.LightningDataModule):
         if self.force_rebuild:
             print("[RTDataModule] force_rebuild=True, reprocessing splits...")
         
-        # Load raw data
+        # Load raw data, auto-detecting the CSV delimiter if not configured.
         print(f"[RTDataModule] Loading raw data from {self.config.raw_data_path}")
-        df = pl.read_csv(self.config.raw_data_path, separator=";")
+        separator = self.config.csv_separator
+        if separator is None:
+            with open(self.config.raw_data_path, "r") as f:
+                first_line = f.readline()
+            if "\t" in first_line:
+                separator = "\t"
+            elif ";" in first_line:
+                separator = ";"
+            else:
+                separator = ","
+            print(f"[RTDataModule] Auto-detected CSV separator: {separator!r}")
+        df = pl.read_csv(self.config.raw_data_path, separator=separator)
         
         # Preprocess
         df = preprocess_raw_data(df, self.config)

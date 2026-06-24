@@ -17,6 +17,8 @@ class DataConfig:
     cid_column: str = "cid"
     target_columns: list[str] = field(default_factory=lambda: ["rt"])  # Names of target columns to predict
     inchi_column: str = "inchi"
+    smiles_column: Optional[str] = None  # If set and present, use this column directly as SMILES
+    csv_separator: Optional[str] = None  # CSV delimiter; None -> auto-detect from first line
     dataset_name: str = "default"  # Used to make output dirs / experiment names dataset-aware
     
     # Splitting

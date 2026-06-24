@@ -191,6 +191,21 @@ def main() -> None:
     base_model_config = load_yaml_to_dataclass(Path("configs/model_config.yaml"), ModelConfig)
     base_training_config = load_yaml_to_dataclass(Path("configs/training_config.yaml"), TrainingConfig)
 
+    # Configure for the Enveda 180 dataset: use pre-existing SMILES, predict
+    # both RT (seconds) and CCS, normalize both targets, and optimize the sum
+    # of per-target MSEs.
+    base_data_config.raw_data_path = Path("enveda_180.csv")
+    base_data_config.dataset_name = "enveda_180"
+    base_data_config.cid_column = "name"
+    base_data_config.target_columns = ["rt_seconds", "ccs"]
+    base_data_config.smiles_column = "smiles"
+    base_data_config.inchi_column = "smiles"  # only used for null-drop fallback
+    base_data_config.filter_invalid_inchi = False
+    base_data_config.target_filters = {}
+
+    base_training_config.loss_fn = "mse"
+    base_training_config.monitor_metric = "val/loss"
+
     num_targets = len(base_data_config.target_columns)
     num_heads = base_model_config.pyg.num_heads
 
