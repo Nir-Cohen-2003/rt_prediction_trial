@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import torch_geometric.nn as gnn
 from torch_geometric.nn import MessagePassing, global_mean_pool, global_add_pool, global_max_pool
 from torch_geometric.utils import softmax
+from typing import Callable
 from ..config import ModelConfig
 from .pyg_components import TransformerPool, SAGPool, TopKPool, AttentiveFPReadout, get_activation
 
@@ -46,20 +47,20 @@ class GENConv(MessagePassing):
         act_fn = get_activation(activation)
         
         # MLP for message transformation
-        mlp = []
+        mlp: list[nn.Module] = []
         for i in range(mlp_layers):
             if i == 0:
                 mlp.append(nn.Linear(in_dim, out_dim))
             else:
                 mlp.append(nn.Linear(out_dim, out_dim))
-            
+
             if norm == 'batch':
                 mlp.append(nn.BatchNorm1d(out_dim))
             elif norm == 'layer':
                 mlp.append(nn.LayerNorm(out_dim))
             elif norm == 'instance':
                 mlp.append(nn.InstanceNorm1d(out_dim))
-            
+
             mlp.append(get_activation(activation))
         
         self.msg_norm = nn.Sequential(*mlp)
@@ -75,12 +76,12 @@ class GENConv(MessagePassing):
         edge_embedding = self.edge_encoder(edge_attr)
         return self.propagate(edge_index, x=x, edge_attr=edge_embedding)
     
-    def message(self, x_j, edge_attr):
+    def message(self, x_j, edge_attr):  # type: ignore[override]
         """Construct messages from neighbors."""
         msg = x_j + edge_attr
         return self.msg_norm(msg)
-    
-    def aggregate(self, inputs, index, dim_size=None):
+
+    def aggregate(self, inputs, index, dim_size=None):  # type: ignore[override]
         """Aggregate messages using softmax or power mean."""
         if self.aggregator == 'softmax':
             # SoftMax aggregation
@@ -203,7 +204,11 @@ class DeeperGCN(nn.Module):
             else:
                 raise ValueError(f"Unknown norm type: {norm}")
         
-        # Readout/Pooling layer
+        # Readout/Pooling layer. Annotate explicitly as a callable that returns
+        # a tensor so the various pool modules (with different forward
+        # signatures) can all be assigned to the same attribute without a
+        # type conflict.
+        self.readout: Callable[..., torch.Tensor]
         if pool_type == 'mean':
             self.readout = lambda x, batch, edge_index, edge_attr: global_mean_pool(x, batch)
         elif pool_type == 'sum':
@@ -231,7 +236,7 @@ class DeeperGCN(nn.Module):
             raise ValueError(f"Unknown pool_type: {pool_type}")
         
         # Output MLP - configurable architecture
-        mlp_list = []
+        mlp_list: list[nn.Module] = []
         for i in range(ffn_num_layers):
             if i == 0:
                 mlp_list.append(nn.Linear(hid_dim, ffn_hidden_dim))

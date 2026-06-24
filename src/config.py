@@ -251,6 +251,8 @@ class Config:
                 # Use PyG's built-in from_smiles to get dimensions
                 # Test with a simple molecule
                 test_graph = from_smiles('C')
+                if test_graph.x is None:
+                    raise ValueError("from_smiles('C') returned a graph with no node features")
                 self.model.pyg.node_in_dim = test_graph.x.shape[1]
                 if test_graph.edge_attr is not None:
                     self.model.pyg.edge_in_dim = test_graph.edge_attr.shape[1]

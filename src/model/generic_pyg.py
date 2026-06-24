@@ -118,7 +118,7 @@ class GenericPyGModel(nn.Module):
             raise ValueError(f"Unknown pool_type: {pool_type}")
         
         # Output MLP
-        mlp_layers = []
+        mlp_layers: list[nn.Module] = []
         for i in range(ffn_num_layers):
             if i == 0:
                 mlp_layers.append(nn.Linear(hid_dim, ffn_hidden_dim))
@@ -141,7 +141,9 @@ class GenericPyGModel(nn.Module):
 
         # Initial encoding
         x = self.node_encoder(x)
-        edge_attr_encoded = self.edge_encoder(edge_attr) if self.edge_encoder else None
+        edge_attr_encoded = (
+            self.edge_encoder(edge_attr) if self.edge_encoder is not None else None
+        )
         
         # Message passing with residual connections
         for i, conv in enumerate(self.convs):

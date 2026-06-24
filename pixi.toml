@@ -15,7 +15,7 @@ channel-priority = "disabled"
 cuda = "13.0"
 
 [tasks]
-check-all = "ty check src"
+check-all = "pyrefly check src"
 
 train = { cmd = "python -m src.training.trainer --data-config configs/data_config.yaml --model-config configs/model_config.yaml --training-config configs/training_config.yaml --experiment-name rt_baseline", depends-on = ["check-all"] }
 train-chemeleon = { cmd = "python -m src.training.trainer --data-config configs/data_config.yaml --model-config configs/model_config_chemeleon.yaml --training-config configs/training_config_chemeleon.yaml --experiment-name rt_chemeleon_full --description 'Fine-tuning CheMeleon 100M for RT prediction'", depends-on = ["check-all"] }
@@ -42,6 +42,6 @@ pyyaml = "*"
 mces_splitting = ">=0.6.0"
 hrms_utils = ">=0.6.2"
 marimo = "*"
+pyrefly = "*"
 [pypi-dependencies]
 jax = {version = "*", extras = ["cuda13"]}
-ty = "*"

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch_geometric.nn as gnn
-from typing import Literal
 from torch_geometric.nn import global_mean_pool, global_add_pool
 from torch_geometric.utils import softmax as pyg_softmax
 
@@ -45,7 +44,7 @@ class TopKPool(nn.Module):
         x, edge_index, edge_attr, batch, _, _ = self.pool(x, edge_index, edge_attr, batch)
         return gnn.global_mean_pool(x, batch)
 
-def get_activation(name: Literal["relu", "silu", "gelu"]) -> nn.Module:
+def get_activation(name: str) -> nn.Module:
     if name == "relu":
         return nn.ReLU()
     elif name == "silu":

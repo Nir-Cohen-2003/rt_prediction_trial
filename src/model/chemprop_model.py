@@ -23,8 +23,12 @@ def build_chemprop_mpnn(model_config: ModelConfig) -> MPNN:
     
     # Check if using CheMeleon pretrained model
     if cfg.use_chemeleon:
+        if cfg.chemeleon_checkpoint is None:
+            raise ValueError(
+                "chemeleon_checkpoint must be set when use_chemeleon=True"
+            )
         print(f"[build_chemprop_mpnn] Loading CheMeleon pretrained model from {cfg.chemeleon_checkpoint}")
-        
+
         checkpoint_path = Path(cfg.chemeleon_checkpoint)
         
         if not checkpoint_path.exists():

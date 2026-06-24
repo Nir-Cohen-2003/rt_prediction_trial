@@ -276,9 +276,12 @@ def build_objective(data_cfg: DataConfig,
             # ============================================================
             
             if "message_hidden_dim_choices" in tuning_cfg:
-                message_hidden_dim = trial.suggest_categorical(
-                    "message_hidden_dim",
-                    tuning_cfg["message_hidden_dim_choices"]
+                message_hidden_dim = cast(
+                    int,
+                    trial.suggest_categorical(
+                        "message_hidden_dim",
+                        tuning_cfg["message_hidden_dim_choices"]
+                    )
                 )
             else:
                 message_hidden_dim = base_model_cfg.message_hidden_dim
@@ -293,9 +296,12 @@ def build_objective(data_cfg: DataConfig,
                 num_layers = base_model_cfg.num_layers
             
             if "ffn_hidden_dim_choices" in tuning_cfg:
-                ffn_hidden_dim = trial.suggest_categorical(
-                    "ffn_hidden_dim",
-                    tuning_cfg["ffn_hidden_dim_choices"]
+                ffn_hidden_dim = cast(
+                    int,
+                    trial.suggest_categorical(
+                        "ffn_hidden_dim",
+                        tuning_cfg["ffn_hidden_dim_choices"]
+                    )
                 )
             else:
                 ffn_hidden_dim = base_model_cfg.ffn_hidden_dim
@@ -360,17 +366,23 @@ def build_objective(data_cfg: DataConfig,
                 learning_rate = base_training_cfg.learning_rate
             
             if "batch_size_choices" in tuning_cfg:
-                batch_size = trial.suggest_categorical(
-                    "batch_size",
-                    tuning_cfg["batch_size_choices"]
+                batch_size = cast(
+                    int,
+                    trial.suggest_categorical(
+                        "batch_size",
+                        tuning_cfg["batch_size_choices"]
+                    )
                 )
             else:
                 batch_size = base_training_cfg.batch_size
-            
+
             if "optimizer_choices" in tuning_cfg:
-                optimizer = trial.suggest_categorical(
-                    "optimizer",
-                    tuning_cfg["optimizer_choices"]
+                optimizer = cast(
+                    Literal["adam", "adamw", "sgd"],
+                    trial.suggest_categorical(
+                        "optimizer",
+                        tuning_cfg["optimizer_choices"]
+                    )
                 )
             else:
                 optimizer = base_training_cfg.optimizer
@@ -398,9 +410,12 @@ def build_objective(data_cfg: DataConfig,
             
             # Loss function
             if "loss_fn_choices" in tuning_cfg:
-                loss_fn = trial.suggest_categorical(
-                    "loss_fn",
-                    tuning_cfg["loss_fn_choices"]
+                loss_fn = cast(
+                    Literal["huber", "mae", "mse"],
+                    trial.suggest_categorical(
+                        "loss_fn",
+                        tuning_cfg["loss_fn_choices"]
+                    )
                 )
             else:
                 loss_fn = base_training_cfg.loss_fn
@@ -426,9 +441,12 @@ def build_objective(data_cfg: DataConfig,
             use_scheduler = tuning_cfg.get("tune_scheduler", False)
             
             if use_scheduler and "scheduler_type_choices" in tuning_cfg:
-                scheduler_type = trial.suggest_categorical(
-                    "scheduler_type",
-                    tuning_cfg["scheduler_type_choices"]
+                scheduler_type = cast(
+                    Literal["cosine", "cosine_warmup", "plateau", "step"],
+                    trial.suggest_categorical(
+                        "scheduler_type",
+                        tuning_cfg["scheduler_type_choices"]
+                    )
                 )
                 
                 if scheduler_type == "plateau":

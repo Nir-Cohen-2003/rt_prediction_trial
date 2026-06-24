@@ -32,6 +32,7 @@ class LMDBGraphDataset(Dataset):
     def __getitem__(self, idx):
         # ensure env is opened in this process (worker or main)
         self._ensure_env()
+        assert self.env is not None, "LMDB environment failed to open"
         with self.env.begin() as txn:
             graph_bytes = txn.get(str(idx).encode())
             if graph_bytes is None:

@@ -1,7 +1,7 @@
 import polars as pl
 import lightning as L
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, cast
 import numpy as np
 import hashlib
 import json
@@ -72,6 +72,9 @@ def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
         config.smiles_column is not None and config.smiles_column in df.columns
     )
     smiles_source = config.smiles_column if has_smiles_column else config.inchi_column
+    assert smiles_source is not None, (
+        "Either `smiles_column` or `inchi_column` must be configured in DataConfig"
+    )
 
     # 5. Drop rows with null SMILES source. We deliberately do NOT drop rows
     #    just because a target value is missing; the trainer masks missing targets.
@@ -80,8 +83,10 @@ def preprocess_raw_data(df: pl.DataFrame, config: DataConfig) -> pl.DataFrame:
     # 6. Materialize a canonical "smiles" column.
     if has_smiles_column:
         print(f"[preprocess_raw_data] Using pre-existing SMILES column '{config.smiles_column}'")
-        if config.smiles_column != "smiles":
-            df = df.rename({config.smiles_column: "smiles"})
+        assert config.smiles_column is not None, "has_smiles_column implies smiles_column is set"
+        smiles_col = config.smiles_column
+        if smiles_col != "smiles":
+            df = df.rename({smiles_col: "smiles"})
         df = df.filter(
             pl.col("smiles").is_not_null(),
             pl.col("smiles").ne("")
@@ -454,11 +459,23 @@ class RTDataModule(L.LightningDataModule):
                     f"Target column '{col}' has no non-null values in the training set; "
                     f"cannot compute statistics."
                 )
-            target_means[col] = float(non_null.mean())
+            # The polars stubs for Series.mean/std/min/max declare an overly wide
+            # union of return types. Columns are validated to be numeric above
+            # and we already ensured non_null is non-empty, so the actual values
+            # are floats (or None for empty/all-null columns, ruled out here).
+            mean_val = non_null.mean()
+            std_val = non_null.std()
+            min_val = non_null.min()
+            max_val = non_null.max()
+            assert mean_val is not None, f"non_null.mean() returned None for column '{col}'"
+            assert std_val is not None, f"non_null.std() returned None for column '{col}'"
+            assert min_val is not None, f"non_null.min() returned None for column '{col}'"
+            assert max_val is not None, f"non_null.max() returned None for column '{col}'"
+            target_means[col] = cast(float, mean_val)
             # polars std is sample std (ddof=1) by default; cast to float explicitly
-            target_stds[col] = float(non_null.std())
-            target_mins[col] = float(non_null.min())
-            target_maxs[col] = float(non_null.max())
+            target_stds[col] = cast(float, std_val)
+            target_mins[col] = cast(float, min_val)
+            target_maxs[col] = cast(float, max_val)
         
         stats = {
             "train_size": len(train_df),
@@ -698,7 +715,10 @@ class RTDataModule(L.LightningDataModule):
         
         if skipped > 0:
             print(f"[Warning] Skipped {skipped} invalid SMILES structures")
-        
+
+        assert self.featurizer is not None, (
+            "Chemprop branch requires a featurizer; got None"
+        )
         return MoleculeDataset(datapoints, featurizer=self.featurizer)
     
     def _polars_to_pyg(self, df, target_means: dict, target_stds: dict):
@@ -749,14 +769,14 @@ class RTDataModule(L.LightningDataModule):
                 elif self.config.featurizer_type == "rdkit_deepgcn":
                     # Use DeepGCN featurizer
                     x = torch.from_numpy(get_node_features(mol)).float()
-                    
+
                     # Build edge_index and edge_attr
-                    if len(mol.GetBonds()) > 0:
+                    if len(mol.GetBonds()) > 0:  # type: ignore[arg-type]
                         edges_list = []
                         edge_features_list = []
                         edge_feat_array = get_edge_features(mol)
-                        
-                        for idx, bond in enumerate(mol.GetBonds()):
+
+                        for idx, bond in enumerate(mol.GetBonds()):  # type: ignore[arg-type]
                             i = bond.GetBeginAtomIdx()
                             j = bond.GetEndAtomIdx()
                             # Add edges in both directions
@@ -781,6 +801,9 @@ class RTDataModule(L.LightningDataModule):
                 
                 else:
                     # Use Chemprop featurizer
+                    assert self.featurizer is not None, (
+                        "Chemprop featurizer branch requires a featurizer; got None"
+                    )
                     molgraph = self.featurizer(mol)
                     
                     # Extract graph structure using correct MolGraph attributes
@@ -816,6 +839,9 @@ class RTDataModule(L.LightningDataModule):
 
     def train_dataloader(self):
         """Training dataloader."""
+        assert self.train_dataset is not None, (
+            "train_dataset is not initialized; call setup() before requesting dataloaders"
+        )
         if self.model_type == "chemprop":
             return build_dataloader(
                 self.train_dataset,
@@ -836,9 +862,12 @@ class RTDataModule(L.LightningDataModule):
                 prefetch_factor=4 if self.num_workers > 0 else None,
                 persistent_workers=self.num_workers > 0,
             )
-    
+
     def val_dataloader(self):
         """Validation dataloader."""
+        assert self.val_dataset is not None, (
+            "val_dataset is not initialized; call setup() before requesting dataloaders"
+        )
         if self.model_type == "chemprop":
             return build_dataloader(
                 self.val_dataset,
@@ -858,9 +887,12 @@ class RTDataModule(L.LightningDataModule):
                 prefetch_factor=4 if self.num_workers > 0 else None,
                 persistent_workers=self.num_workers > 0,
             )
-    
+
     def test_dataloader(self):
         """Test dataloader."""
+        assert self.test_dataset is not None, (
+            "test_dataset is not initialized; call setup() before requesting dataloaders"
+        )
         if self.model_type == "chemprop":
             return build_dataloader(
                 self.test_dataset,

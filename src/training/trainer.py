@@ -122,7 +122,10 @@ class RTTrainer(L.LightningModule):
             torch.tensor([target_stds[k] for k in target_keys], dtype=torch.float32),
         )
 
-        # Select loss function
+        # Select loss function. The loss is assigned below to a nn.Module-
+        # typed attribute so any of MSELoss, L1Loss, HuberLoss, or SmoothL1Loss
+        # is accepted.
+        self.loss_fn: nn.Module
         if training_config.loss_fn == "mse":
             self.loss_fn = nn.MSELoss()
         elif training_config.loss_fn == "mae":
@@ -353,7 +356,7 @@ class RTTrainer(L.LightningModule):
             
             # Update best
             if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
+                self.best_val_loss = val_loss.item()
     
     def configure_optimizers(self):
         """

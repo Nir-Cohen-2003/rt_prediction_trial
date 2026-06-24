@@ -364,6 +364,9 @@ def split_butina(
     print(f"[split_butina] Computing distance matrix for {n} molecules...")
     
     # Compute pairwise Tanimoto distances
+    # Initialized to [] so it is always defined; the GPU path reassigns to a
+    # numpy array of pairwise distances.
+    distances: list[float] | np.ndarray = []
     if use_gpu:
         print(f"[split_butina] Using JAX GPU-accelerated distance computation")
         try:

@@ -281,18 +281,18 @@ def gasteiger_charge(atom: Chem.Atom) -> List[float]:
 def get_node_features(mol: Chem.Mol, exclude_feature: Optional[str] = None) -> np.ndarray:
     """Get node features for all atoms in molecule."""
     node_features = np.array([
-        atom_featurizer(atom, exclude_feature) for atom in mol.GetAtoms()
+        atom_featurizer(atom, exclude_feature) for atom in mol.GetAtoms()  # type: ignore[arg-type]
     ], dtype='float32')
     return node_features
 
 
 def get_edge_features(mol: Chem.Mol, exclude_feature: Optional[str] = None) -> np.ndarray:
     """Get edge features for all bonds in molecule."""
-    if len(mol.GetBonds()) == 0:
+    if len(mol.GetBonds()) == 0:  # type: ignore[arg-type]
         return np.empty((0, get_edge_dim(exclude_feature)), dtype='float32')
-    
+
     edge_features = np.array([
-        bond_featurizer(bond, exclude_feature) for bond in mol.GetBonds()
+        bond_featurizer(bond, exclude_feature) for bond in mol.GetBonds()  # type: ignore[arg-type]
     ], dtype="float32")
     return edge_features
 
