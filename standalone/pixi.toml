@@ -1,0 +1,33 @@
+[workspace]
+authors = ["Nir Cohen <nircoh@weizmann.ac.il>"]
+channels = [
+    "https://prefix.dev/rapidsai",
+    "https://prefix.dev/conda-forge",
+    "https://prefix.dev/nvidia",
+    "https://prefix.dev/nir-cohen"
+]
+name = "rt_trial_notebook"
+platforms = ["linux-64"]
+version = "0.1.0"
+channel-priority = "disabled"
+
+[system-requirements]
+cuda = "13.0"
+
+[dependencies]
+python = "3.12.*"
+
+polars = ">=1.41.0,<2"
+lightning = "*"
+python-lmdb = "*"
+
+pytorch-gpu = ">=2.7.0"
+cuda-version = "13.*"
+pytorch_geometric = ">=2.6.1"
+pyyaml = "*"
+rdkit = "*"
+marimo = "*"
+mces_splitting = "==0.6.0"
+fast_mces_lower_bound = "==1.2.0"
+[tasks]
+notebook = "marimo edit systematic_comparison_notebook.py"
